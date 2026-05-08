@@ -134,6 +134,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_CUSTOM_S3_WROOM_1
         bool "Custom S3 WROOM-1 (INMP441+MAX98357+ST7789)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_CUSTOM_WATCH_S3
+        bool "Custom Watch S3 (CO5300+NS4168+MS4030+BMM150+QMI8658)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_ML307
         bool "Bread Compact ML307/EC801E (面包板 4G)"
         depends on IDF_TARGET_ESP32S3

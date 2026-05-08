@@ -52,11 +52,13 @@ list(APPEND SOURCES
     "boards/common/afsk_demod.cc"
     "boards/common/axp2101.cc"
     "boards/common/backlight.cc"
+    "boards/common/bmm150.cc"
     "boards/common/button.cc"
     "boards/common/i2c_device.cc"
     "boards/common/knob.cc"
     "boards/common/power_save_timer.cc"
     "boards/common/press_to_talk_mcp_tool.cc"
+    "boards/common/qmi8658.cc"
     "boards/common/sleep_timer.cc"
     "boards/common/sy6970.cc"
     "boards/common/system_reset.cc"
@@ -537,6 +539,11 @@ elseif(CONFIG_BOARD_TYPE_CUSTOM_S3_WROOM_1)
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_32)
+elseif(CONFIG_BOARD_TYPE_CUSTOM_WATCH_S3)
+    set(BOARD_TYPE "custom-watch-s3")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_TUDOUZI)
     set(BOARD_TYPE "tudouzi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)

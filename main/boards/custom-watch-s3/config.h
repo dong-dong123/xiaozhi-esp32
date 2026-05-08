@@ -1,0 +1,62 @@
+#ifndef _BOARD_CONFIG_H_
+#define _BOARD_CONFIG_H_
+
+#include <driver/gpio.h>
+
+// ========== 音频 (I2S Duplex, NS4168 + MS4030 共享 BCLK/WS) ==========
+#define AUDIO_INPUT_SAMPLE_RATE  16000
+#define AUDIO_OUTPUT_SAMPLE_RATE 24000
+
+#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_15
+#define AUDIO_I2S_GPIO_WS   GPIO_NUM_16
+#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_14
+#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_46
+
+#define AUDIO_AMP_ENABLE_PIN GPIO_NUM_NC
+
+// ========== CO5300 QSPI AMOLED 1.96" 410x502 ==========
+#define DISPLAY_WIDTH   410
+#define DISPLAY_HEIGHT  502
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SWAP_XY  false
+#define DISPLAY_INVERT_COLOR false
+#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
+#define DISPLAY_OFFSET_X  0
+#define DISPLAY_OFFSET_Y  0
+
+// QSPI 信号
+#define DISPLAY_QSPI_CS    GPIO_NUM_10
+#define DISPLAY_QSPI_CLK   GPIO_NUM_12
+#define DISPLAY_QSPI_SIO0  GPIO_NUM_11
+#define DISPLAY_QSPI_SIO1  GPIO_NUM_13
+#define DISPLAY_QSPI_SIO2  GPIO_NUM_17
+#define DISPLAY_QSPI_SIO3  GPIO_NUM_18
+#define DISPLAY_QSPI_RST   GPIO_NUM_9
+#define DISPLAY_QSPI_TE    GPIO_NUM_8
+
+// 屏幕电源使能（BV6802 VCI_EN）
+#define DISPLAY_VCI_EN     GPIO_NUM_3
+
+// ========== 触摸 I2C_NUM_0 (CST82x) ==========
+#define TOUCH_I2C_SDA  GPIO_NUM_4
+#define TOUCH_I2C_SCL  GPIO_NUM_5
+#define TOUCH_RST      GPIO_NUM_21
+#define TOUCH_INT      GPIO_NUM_6
+
+// ========== 传感器 I2C_NUM_1 (BMM150 + QMI8658 共用 SDA=1, SCL=2) ==========
+#define SENSOR_I2C_SDA  GPIO_NUM_1
+#define SENSOR_I2C_SCL  GPIO_NUM_2
+#define BMM150_DRDY      GPIO_NUM_19  // BMM150 数据就绪（可选）
+#define BMM150_INT       GPIO_NUM_20  // BMM150 中断（可选）
+#define QMI8658_INT1     GPIO_NUM_41  // QMI8658 中断1（可选）
+#define QMI8658_INT2     GPIO_NUM_42  // QMI8658 中断2（可选）
+
+// ========== 按键 / LED ==========
+#define BUILTIN_LED_GPIO        GPIO_NUM_NC
+#define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define TOUCH_BUTTON_GPIO       GPIO_NUM_NC
+#define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_NC
+#define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_NC
+
+#endif // _BOARD_CONFIG_H_
