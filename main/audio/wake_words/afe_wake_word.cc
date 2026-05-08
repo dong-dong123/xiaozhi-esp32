@@ -72,9 +72,6 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
     afe_config->aec_init = codec_->input_reference();
-#ifdef CONFIG_BOARD_TYPE_CUSTOM_WATCH_S3
-    afe_config->vad_mode = 0;  // 低灵敏度 VAD，适配 MS4030 麦克风
-#endif
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
     afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 1;
