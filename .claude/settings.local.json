@@ -5,7 +5,19 @@
       "Bash(cmd.exe /c \"dir /b C:\\\\Espressif\\\\frameworks\")",
       "Bash(powershell.exe -Command \"& 'C:\\\\Espressif\\\\Initialize-Idf.ps1' 2>&1 | Select-Object -First 20\")",
       "Bash(cmd.exe /c \"export.bat 2>&1\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find \"C:/Users/Admin/Downloads/ESP32-S3-Display开发板资料/ESP32-S3-Display开发板资料/ESP-IDF代码/ESP32-S3-Display_AMOLED_LVGL-V9\" -name \"*.c\" -o -name \"*.cc\" -o -name \"*.h\" -o -name \"*.cpp\" 2>/dev/null | head -30)",
+      "Read(//c/Users/Admin/Downloads/ESP32-S3-Display开发板资料/ESP32-S3-Display开发板资料/ESP-IDF代码/ESP32-S3-Display_AMOLED_LVGL-V9/**)",
+      "Bash(IDF_PATH=\"C:/Espressif/frameworks/esp-idf-v5.5.4\" C:/Espressif/python_env/idf5.5_py3.11_env/Scripts/python.exe C:/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py reconfigure)",
+      "Bash(export PATH=\"/c/Espressif/tools/xtensa-esp-elf/esp-14.2_20241119/xtensa-esp-elf/bin:/c/Espressif/tools/riscv32-esp-elf/esp-14.2_20241119/riscv32-esp-elf/bin:/c/Espressif/tools/esp32ulp-elf/2.38_20240808/esp32ulp-elf/bin:/c/Espressif/tools/openocd-esp32/v0.12.0-esp32-20241016/openocd-esp32/bin:/c/Espressif/tools/cmake/3.30.2/bin:/c/Espressif/tools/ninja/1.12.1:$PATH\")",
+      "Bash(export IDF_PATH=\"/c/Espressif/frameworks/esp-idf-v5.5.4\")",
+      "Bash(/c/Espressif/python_env/idf5.5_py3.11_env/Scripts/python.exe /c/Espressif/frameworks/esp-idf-v5.5.4/tools/idf.py build)",
+      "Bash(ls -la \"C:\\\\Users\\\\Admin\\\\Downloads\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\IDF代码\\\\ESP32S3-IDF_AMOLED_LVGL-V8\")",
+      "Read(//c/Users/Admin/Downloads/1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动/1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动/IDF代码/ESP32S3-IDF_AMOLED_LVGL-V8/**)",
+      "Bash(find \"C:\\\\Users\\\\Admin\\\\Downloads\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\IDF代码\\\\ESP32S3-IDF_AMOLED_LVGL-V8\" -type f -name \"*.c\" -o -name \"*.h\" -o -name \"*.txt\" -o -name \"*.md\" 2>/dev/null | sort)",
+      "Bash(grep -A 40 \"typedef struct {\" \"C:\\\\Espressif\\\\frameworks\\\\esp-idf-v5.5.4\\\\components\\\\driver\\\\spi\\\\include\\\\driver\\\\spi_common.h\" | head -50 2>/dev/null || grep -A 40 \"spi_bus_config_t\" \"C:\\\\Espressif\\\\frameworks\\\\esp-idf-v5.5.4\\\\components\\\\esp_driver_spi\\\\include\\\\driver\\\\spi_common.h\" | head -50)",
+      "Read(//c/Espressif/frameworks/esp-idf-v5.5.4/components/driver/spi/include/driver/**)",
+      "Read(//c/Espressif/frameworks/esp-idf-v5.5.4/components/esp_driver_spi/include/driver/**)"
     ]
   }
 }

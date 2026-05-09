@@ -9,6 +9,7 @@
 #include "button.h"
 #include "config.h"
 #include "device_state.h"
+#include "settings.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
@@ -24,7 +25,7 @@
 #include <freertos/task.h>
 #include <http.h>
 #include <lvgl.h>
-
+extern "C" void lv_draw_sw_rgb565_swap(void *buf, uint32_t buf_size);
 #define TAG "CustomWatchS3"
 
 // NS4168 专用 16-bit I2S：TX 立体声双声道输出，RX 只读左声道（MS4030 右声道三态=噪声）
@@ -72,64 +73,56 @@ public:
 #define WEATHER_URL "https://wttr.in/Shenzhen?format=j1"
 #define WEATHER_REFRESH_MS (30 * 60 * 1000)
 
+class LcdDisplayWrapper : public LcdDisplay {
+public:
+    LcdDisplayWrapper(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t p, int w, int h)
+        : LcdDisplay(io, p, w, h) {}
+};
+
 class CustomWatchS3Board;
 static void StartWeatherFetch(CustomWatchS3Board* board);
 
-// ==================== CO5300 QSPI Opcode ====================
+// ==================== CO5300 原生初始化命令 (410x502) ====================
 #define LCD_OPCODE_WRITE_CMD   (0x02ULL)
 #define LCD_OPCODE_READ_CMD    (0x03ULL)
 #define LCD_OPCODE_WRITE_COLOR (0x32ULL)
 
-// ==================== CO5300 厂商初始化命令序列 (410x502) ====================
 static const co5300_lcd_init_cmd_t vendor_specific_init[] = {
-    {0x11, (uint8_t[]){0x00}, 0, 600},  // Sleep out
-
-    {0xFE, (uint8_t[]){0x20}, 1, 0},    // Bank 0x20
+    {0x11, (uint8_t[]){0x00}, 0, 600},  // Sleep out, 600ms
+    {0xFE, (uint8_t[]){0x20}, 1, 0},     // Bank 0x20
     {0x19, (uint8_t[]){0x10}, 1, 0},
     {0x1C, (uint8_t[]){0xA0}, 1, 0},
-
-    {0xFE, (uint8_t[]){0x00}, 1, 0},    // Bank 0x00
+    {0xFE, (uint8_t[]){0x00}, 1, 0},     // Bank 0x00
     {0xC4, (uint8_t[]){0x80}, 1, 0},
-    {0x3A, (uint8_t[]){0x55}, 1, 0},    // 16bpp RGB565
-    {0x35, (uint8_t[]){0x00}, 1, 0},    // TE off
-    {0x53, (uint8_t[]){0x20}, 1, 0},    // Backlight control
-    {0x51, (uint8_t[]){0xFF}, 1, 0},    // Brightness max
+    {0x3A, (uint8_t[]){0x55}, 1, 0},     // RGB565
+    {0x35, (uint8_t[]){0x00}, 1, 0},     // TE off
+    {0x53, (uint8_t[]){0x20}, 1, 0},
+    {0x51, (uint8_t[]){0xFF}, 1, 0},     // 亮度最大
     {0x63, (uint8_t[]){0xFF}, 1, 0},
-    // 列地址 0 ~ 409 (410px)
-    {0x2A, (uint8_t[]){0x00, 0x00, 0x01, 0x99}, 4, 0},
-    // 行地址 0 ~ 501 (502px)
-    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xF5}, 4, 0},
-    // MY=1, MX=0, MV=0, BGR=0 → 竖屏
-    {0x36, (uint8_t[]){0x00}, 1, 0},
-    {0x29, (uint8_t[]){0x00}, 0, 600},  // Display on
+    {0x2A, (uint8_t[]){0x00, 0x16, 0x01, 0xAF}, 4, 0},  // 列 22-431 (410列+偏移22)
+    {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xF5}, 4, 0},  // 行 0-501
+    {0x36, (uint8_t[]){0x00}, 1, 0},     // MADCTL: 无BGR，靠lv_draw_sw_rgb565_swap
+    {0x29, (uint8_t[]){0x00}, 0, 600},   // Display on, 600ms
 };
 
-// ==================== CO5300 LVGL rounder (4-pixel对齐) ====================
+// ==================== LVGL rounder（偶数对齐） ====================
 static void lcd_rounder_cb(lv_event_t* e) {
     lv_area_t* area = (lv_area_t*)lv_event_get_param(e);
-    // CO5300 QSPI 要求偶数坐标
     area->x1 = (area->x1 >> 1) << 1;
     area->y1 = (area->y1 >> 1) << 1;
     area->x2 = ((area->x2 >> 1) << 1) + 1;
     area->y2 = ((area->y2 >> 1) << 1) + 1;
 }
 
-// ==================== 背光（通过 CO5300 0x51 命令控制） ====================
+// ==================== 背光 ====================
 class WatchBacklight : public Backlight {
 private:
     esp_lcd_panel_io_handle_t panel_io_;
 public:
     WatchBacklight(esp_lcd_panel_io_handle_t io) : Backlight(), panel_io_(io) {}
-
 protected:
     virtual void SetBrightnessImpl(uint8_t brightness) override {
-        auto* display = Board::GetInstance().GetDisplay();
-        if (display) {
-            DisplayLockGuard lock(display);
-            uint8_t data = (uint8_t)((255 * brightness) / 100);
-            uint32_t cmd = (LCD_OPCODE_WRITE_CMD << 24) | (0x51 & 0xFF);
-            esp_lcd_panel_io_tx_param(panel_io_, cmd, &data, 1);
-        }
+        // 亮度在 init 中已设置为 0xFF 最大，不在此处重复发送
     }
 };
 
@@ -139,6 +132,7 @@ private:
     i2c_master_bus_handle_t touch_i2c_bus_;   // I2C_NUM_0
     i2c_master_bus_handle_t sensor_i2c_bus_;  // I2C_NUM_1
     Button boot_button_;
+    esp_lcd_panel_io_handle_t panel_io_;
     LcdDisplay* display_;
     WatchBacklight* backlight_;
     WatchFace* watch_face_;
@@ -183,7 +177,7 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
-    // ---- CO5300 显示屏 ----
+    // ---- QSPI AMOLED 显示屏 ----
     void InitializeDisplay() {
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
@@ -192,6 +186,7 @@ private:
         esp_lcd_panel_io_spi_config_t io_config = CO5300_PANEL_IO_QSPI_CONFIG(
             DISPLAY_QSPI_CS, nullptr, nullptr);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &panel_io));
+        panel_io_ = panel_io;
 
         ESP_LOGI(TAG, "Init CO5300 driver");
         const co5300_vendor_config_t vendor_config = {
@@ -199,32 +194,84 @@ private:
             .init_cmds_size = sizeof(vendor_specific_init) / sizeof(co5300_lcd_init_cmd_t),
             .flags = { .use_qspi_interface = 1 },
         };
-
-        esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = DISPLAY_QSPI_RST;
-        panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
-        panel_config.bits_per_pixel = 16;
-        panel_config.vendor_config = (void*)&vendor_config;
+        const esp_lcd_panel_dev_config_t panel_config = {
+            .reset_gpio_num = DISPLAY_QSPI_RST,
+            .rgb_ele_order = DISPLAY_RGB_ORDER,
+            .bits_per_pixel = 16,
+            .vendor_config = (void*)&vendor_config,
+        };
         ESP_ERROR_CHECK(esp_lcd_new_panel_co5300(panel_io, &panel_config, &panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel, 22, 0));
 
-        esp_lcd_panel_reset(panel);
-        esp_lcd_panel_init(panel);
-        esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR);
-        esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
-        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
-        esp_lcd_panel_disp_on_off(panel, true);
+        // 暗色主题
+        {
+            Settings settings("display", true);
+            settings.SetString("theme", "dark");
+        }
 
-        display_ = new SpiLcdDisplay(panel_io, panel,
-            DISPLAY_WIDTH, DISPLAY_HEIGHT,
-            DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
-            DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        // ———— 参考代码方式 LVGL 初始化 ————
+        lv_init();
+        lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+        port_cfg.task_priority = 1;
+        port_cfg.timer_period_ms = 50;
+        lvgl_port_init(&port_cfg);
 
-        // 注册 LVGL rounder（QSPI 需要偶数对齐）
-        lv_display_t* disp = lv_display_get_default();
+        size_t buf_sz = DISPLAY_WIDTH * 20 * sizeof(lv_color_t);
+        void *buf1 = heap_caps_malloc(buf_sz, MALLOC_CAP_DMA);
+        void *buf2 = heap_caps_malloc(buf_sz, MALLOC_CAP_DMA);
+        assert(buf1 && buf2);
+
+        lv_display_t *disp = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        lv_display_set_buffers(disp, buf1, buf2, buf_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+        lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+        lv_display_set_user_data(disp, panel);
+        static int flush_cnt = 0;
+        static int flush_done_cnt = 0;
+        lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+            flush_cnt++;
+            if (flush_cnt <= 3) {
+                ESP_LOGI(TAG, "LVGL flush #%d area=%d,%d-%d,%d (%dx%d)",
+                         flush_cnt, a->x1, a->y1, a->x2, a->y2,
+                         a->x2-a->x1+1, a->y2-a->y1+1);
+            }
+            auto *p = (esp_lcd_panel_handle_t)lv_display_get_user_data(d);
+            int w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
+            lv_draw_sw_rgb565_swap(px, w * h);
+            esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px);
+        });
+
+        // 每5秒打印 flush 计数（LVGL timer，安全上下文）
+        lv_timer_create([](lv_timer_t* t) {
+            ESP_LOGI(TAG, "FLUSH-MON: flush=%d done=%d", flush_cnt, flush_done_cnt);
+        }, 5000, nullptr);
         lv_display_add_event_cb(disp, lcd_rounder_cb, LV_EVENT_INVALIDATE_AREA, nullptr);
 
+        const esp_lcd_panel_io_callbacks_t cbs = {
+            .on_color_trans_done = [](esp_lcd_panel_io_handle_t io,
+                                       esp_lcd_panel_io_event_data_t *e, void *ctx) -> bool {
+                flush_done_cnt++;
+                lv_display_flush_ready((lv_display_t*)ctx);
+                return false;
+            }
+        };
+        esp_lcd_panel_io_register_event_callbacks(panel_io, &cbs, disp);
+
+        // 暗色主题
+        { Settings s("display", true); s.SetString("theme", "dark"); }
+
+        display_ = new LcdDisplayWrapper(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+        // 确保亮度最大（QSPI 命令格式须与 CO5300 驱动 tx_param 一致: 0x0200_51_00 + data）
+        {
+            uint8_t b = 0xFF;
+            uint32_t cmd = (LCD_OPCODE_WRITE_CMD << 24) | (0x51UL << 8);
+            ESP_LOGI(TAG, "BRIGHTNESS: sending QSPI cmd=0x%08lX data=0x%02X", cmd, b);
+            esp_lcd_panel_io_tx_param(panel_io, cmd, &b, 1);
+        }
+
         backlight_ = new WatchBacklight(panel_io);
-        // 背光延迟设置（避免 SPI 总线与 LVGL 渲染冲突）
         lv_timer_create([](lv_timer_t* t) {
             auto* bl = static_cast<WatchBacklight*>(lv_timer_get_user_data(t));
             bl->RestoreBrightness();
