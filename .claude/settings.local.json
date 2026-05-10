@@ -21,7 +21,15 @@
       "Bash(ls \"C:\\\\Users\\\\Admin\\\\Downloads\\\\ESP32-S3-Display开发板资料\\\\ESP32-S3-Display开发板资料\\\\ESP-IDF代码\")",
       "Read(//c/Users/Admin/Downloads/ESP32-S3-Display开发板资料/ESP32-S3-Display开发板资料/ESP-IDF代码/**)",
       "Bash(dir \"c:\\\\Users\\\\Admin\\\\Desktop\\\\AIxiaozhi\\\\xiaozhi-esp32\\\\managed_components\\\\78__xiaozhi-fonts\\\\src\\\\font_puhui*\")",
-      "Bash(dir \"c:/Users/Admin/Desktop/AIxiaozhi/xiaozhi-esp32/managed_components/78__xiaozhi-fonts/src/font_puhui*\")"
+      "Bash(dir \"c:/Users/Admin/Desktop/AIxiaozhi/xiaozhi-esp32/managed_components/78__xiaozhi-fonts/src/font_puhui*\")",
+      "Read(//d/Download/QMI8658资料/QMI8658资料/**)",
+      "Bash(dir \"D:\\\\Download\\\\QMI8658资料\\\\QMI8658资料\")",
+      "Bash(ls -la \"D:\\\\Download\\\\QMI8658资料\\\\QMI8658资料\\\\\")",
+      "Read(//d/Download/QMI8658资料/**)",
+      "Bash(mkdir -p \"/c/Users/Admin/Desktop/co5300_test/main\" \"/c/Users/Admin/Desktop/co5300_test/components/esp_lcd_co5300/include\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Admin\\Desktop\\co5300_test"
     ]
   }
 }

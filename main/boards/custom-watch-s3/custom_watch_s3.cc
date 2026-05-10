@@ -24,6 +24,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <http.h>
+#include <esp_http_client.h>
 #include <lvgl.h>
 extern "C" void lv_draw_sw_rgb565_swap(void *buf, uint32_t buf_size);
 #define TAG "CustomWatchS3"
@@ -70,7 +71,7 @@ public:
     }
 };
 
-#define WEATHER_URL "https://wttr.in/Shenzhen?format=j1"
+#define WEATHER_URL "http://wttr.in/Shenzhen?format=j1"
 #define WEATHER_REFRESH_MS (30 * 60 * 1000)
 
 class LcdDisplayWrapper : public LcdDisplay {
@@ -337,25 +338,10 @@ private:
         });
     }
 
-    // ---- 传感器初始化（P5+P6，失败不阻塞启动） ----
+    // ---- 传感器初始化（BMM150暂屏蔽，QMI8658已修复寄存器） ----
     void InitializeSensors() {
-        // BMM150 磁力计（在 FreeRTOS 任务中尝试，避免阻塞主线程）
-        xTaskCreate([](void* arg) {
-            auto* self = static_cast<CustomWatchS3Board*>(arg);
-            vTaskDelay(pdMS_TO_TICKS(500));  // 等网络/WiFi 先启动
-
-            auto* bmm = new Bmm150(self->sensor_i2c_bus_, 0x10);
-            if (bmm->Init()) {
-                self->bmm150_ = bmm;
-                ESP_LOGI(TAG, "BMM150 OK");
-            } else {
-                ESP_LOGW(TAG, "BMM150 not found - compass disabled");
-                delete bmm;
-            }
-            vTaskDelete(nullptr);
-        }, "bmm_init", 2048, this, 1, nullptr);
-
-        // QMI8658 六轴 IMU（同样在任务中初始化）
+        // TODO: BMM150 — 待获取数据手册后调试
+        // QMI8658 六轴 IMU
         xTaskCreate([](void* arg) {
             auto* self = static_cast<CustomWatchS3Board*>(arg);
             vTaskDelay(pdMS_TO_TICKS(800));
@@ -370,23 +356,14 @@ private:
                     .on_shake = OnImuShake,
                     .user_data = self,
                 };
-                xTaskCreate(imu_task, "imu", 4096, ctx, 1, nullptr);
+                xTaskCreate(imu_task, "imu", 4096, ctx, 2, nullptr);
                 ESP_LOGI(TAG, "QMI8658 OK, IMU started");
             } else {
                 ESP_LOGW(TAG, "QMI8658 not found - motion disabled");
                 delete qmi;
             }
             vTaskDelete(nullptr);
-        }, "qmi_init", 2048, this, 1, nullptr);
-
-        // 指南针刷新定时器（延迟 2 秒启动，等 BMM150 就绪）
-        lv_timer_create([](lv_timer_t* t) {
-            auto* self = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
-            if (self->bmm150_ && self->watch_face_) {
-                float heading = self->bmm150_->GetHeading();
-                if (heading >= 0) self->watch_face_->UpdateCompass(heading);
-            }
-        }, 100, this);
+        }, "qmi", 4096, this, 2, nullptr);
     }
 
     // ---- 手表界面 + 触摸唤醒（延迟到 LVGL 就绪后创建） ----
@@ -420,12 +397,12 @@ private:
     }
 
     void StartWeatherTimer() {
-        // 延迟 5 秒后首次获取（等网络就绪），之后每 30 分钟刷新
+        // 延迟 15 秒后首次获取（等 MQTT 激活完成），之后每 30 分钟刷新
         lv_timer_t* t = lv_timer_create([](lv_timer_t* timer) {
             StartWeatherFetch(static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(timer)));
             // 首次触发后改为 30 分钟周期
             lv_timer_set_period(timer, WEATHER_REFRESH_MS);
-        }, 5000, this);
+        }, 15000, this);
         lv_timer_set_repeat_count(t, 1);
     }
 
@@ -480,21 +457,16 @@ public:
             self->watch_face_ = new WatchFace(parent);
             ESP_LOGI(TAG, "WatchFace created");
 
-            // 防 CO5300 自动休眠：每5秒用 esp_timer（独立于 LVGL）发送 Display On
-            esp_timer_create_args_t awake_args = {};
-            awake_args.callback = [](void* arg) {
-                esp_lcd_panel_disp_on_off((esp_lcd_panel_handle_t)arg, true);
-            };
-            awake_args.arg = self->panel_;
-            awake_args.dispatch_method = ESP_TIMER_TASK;
-            awake_args.name = "co5300_awake";
-            esp_timer_handle_t awake_timer = nullptr;
-            esp_timer_create(&awake_args, &awake_timer);
-            esp_timer_start_periodic(awake_timer, 5000000);  // 5秒
+            // 防 CO5300 休眠：每3秒触发 LVGL 刷新产生像素数据
+            // 表盘模式：时钟每1秒刷新自然保活；聊天模式：此定时器确保持续通信
+            lv_timer_create([](lv_timer_t* t) {
+                lv_obj_invalidate(lv_scr_act());
+            }, 3000, nullptr);
 
-            // TODO: 传感器和天气在后续 PR 中逐步启用
-            // self->InitializeSensors();
-            // self->StartWeatherTimer();
+            // 天气：FreeRTOS 任务中做 HTTP，不阻塞调度器
+            self->StartWeatherTimer();
+            // 传感器（BMM150 + QMI8658 + 指南针定时器）
+            self->InitializeSensors();
 
             // 触摸唤醒
             lv_obj_add_event_cb(self->watch_face_->GetTapArea(), [](lv_event_t* e) {
@@ -553,39 +525,59 @@ public:
     }
 };
 
-// ==================== 天气获取（P4: wttr.in 免费API） ====================
+// ==================== 天气获取（esp_http_client + 10秒超时 + 跳过证书验证） ====================
+static esp_err_t _weather_event_handler(esp_http_client_event_t* evt) {
+    if (evt->event_id == HTTP_EVENT_ON_DATA) {
+        auto* body = static_cast<std::string*>(evt->user_data);
+        body->append((char*)evt->data, evt->data_len);
+    }
+    return ESP_OK;
+}
+
 static void StartWeatherFetch(CustomWatchS3Board* board) {
-    Application::GetInstance().Schedule([board]() {
-        auto network = Board::GetInstance().GetNetwork();
-        if (!network) return;
+    xTaskCreate([](void* arg) {
+        auto* board = static_cast<CustomWatchS3Board*>(arg);
+        ESP_LOGI(TAG, "天气任务启动");
 
-        auto http = network->CreateHttp(0);
-        http->SetHeader("User-Agent", "XiaozhiWatch/1.0");
-        if (!http->Open("GET", WEATHER_URL)) return;
+        std::string body;
+        esp_http_client_config_t cfg = {};
+        cfg.url = WEATHER_URL;
+        cfg.event_handler = _weather_event_handler;
+        cfg.user_data = &body;
+        cfg.timeout_ms = 30000;
+        cfg.skip_cert_common_name_check = true;
 
-        std::string body = http->ReadAll();
-        http->Close();
-        if (body.empty()) return;
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
 
-        cJSON* root = cJSON_Parse(body.c_str());
-        if (!root) return;
+        ESP_LOGI(TAG, "天气: HTTP状态=%d 错误=%d 数据=%d字节", status, err, body.size());
 
-        cJSON* current = cJSON_GetObjectItem(root, "current_condition");
-        if (current && cJSON_GetArraySize(current) > 0) {
-            cJSON* cond = cJSON_GetArrayItem(current, 0);
-            cJSON* temp = cJSON_GetObjectItem(cond, "temp_C");
-            cJSON* desc_arr = cJSON_GetObjectItem(cond, "weatherDesc");
-            const char* desc = "";
-            if (desc_arr && cJSON_GetArraySize(desc_arr) > 0) {
-                desc = cJSON_GetObjectItem(cJSON_GetArrayItem(desc_arr, 0), "value")->valuestring;
-            }
-            if (temp && desc) {
-                ESP_LOGI(TAG, "Weather: %s %dC", desc, (int)temp->valuedouble);
-                board->OnWeatherUpdate(desc, (int)temp->valuedouble);
+        if (err == ESP_OK && status == 200 && !body.empty()) {
+            cJSON* root = cJSON_Parse(body.c_str());
+            if (root) {
+                cJSON* current = cJSON_GetObjectItem(root, "current_condition");
+                if (current && cJSON_GetArraySize(current) > 0) {
+                    cJSON* cond = cJSON_GetArrayItem(current, 0);
+                    cJSON* temp = cJSON_GetObjectItem(cond, "temp_C");
+                    cJSON* desc_arr = cJSON_GetObjectItem(cond, "weatherDesc");
+                    const char* desc = "";
+                    if (desc_arr && cJSON_GetArraySize(desc_arr) > 0)
+                        desc = cJSON_GetObjectItem(cJSON_GetArrayItem(desc_arr, 0), "value")->valuestring;
+                    if (temp && desc) {
+                        int temp_c = atoi(temp->valuestring);
+                        ESP_LOGI(TAG, "天气: %s %d°C (raw=%s)", desc, temp_c, temp->valuestring);
+                        Application::GetInstance().Schedule([board, temp_c, desc = std::string(desc)]() {
+                            board->OnWeatherUpdate(desc.c_str(), temp_c);
+                        });
+                    }
+                }
+                cJSON_Delete(root);
             }
         }
-        cJSON_Delete(root);
-    });
+        vTaskDelete(nullptr);
+    }, "weather", 8192, board, 1, nullptr);
 }
 
 DECLARE_BOARD(CustomWatchS3Board);

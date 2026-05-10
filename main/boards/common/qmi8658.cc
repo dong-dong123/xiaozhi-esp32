@@ -6,16 +6,19 @@
 
 #define TAG "QMI8658"
 
-// QMI8658 寄存器
-#define REG_WHO_AM_I   0x00
-#define REG_CTRL1      0x02
-#define REG_CTRL2      0x03
-#define REG_CTRL3      0x04
-#define REG_CTRL5      0x06
-#define REG_CTRL7      0x08
-#define REG_STATUS     0x2E
-#define REG_ACC_L      0x35
-#define REG_TEMP_L     0x33
+// QMI8658 寄存器（对照官方数据手册和参考驱动）
+#define REG_WHO_AM_I   0x00   // Chip ID
+#define REG_REV_ID     0x01   // Revision
+#define REG_CTRL1      0x02   // 串行接口 + 地址自增
+#define REG_CTRL2      0x03   // 加速度计配置（量程+ODR）
+#define REG_CTRL3      0x04   // 陀螺仪配置（量程+ODR）
+#define REG_CTRL5      0x06   // LPF 低通滤波
+#define REG_CTRL7      0x08   // 传感器使能
+#define REG_CTRL8      0x09   // 保留
+#define REG_STATUS     0x2E   // 数据就绪状态
+#define REG_ACC_L      0x35   // 加速度 X 低字节（连续12字节）
+#define REG_TEMP_L     0x33   // 温度
+#define REG_RESET      0x60   // 软复位
 
 #define WHO_AM_I_VAL   0x05
 
@@ -46,44 +49,61 @@ bool Qmi8658::Init() {
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = addr_,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = 100000,
     };
     if (i2c_master_bus_add_device(bus_, &dev_cfg, &dev_) != ESP_OK) {
         ESP_LOGE(TAG, "I2C add failed");
         return false;
     }
 
-    // 软复位
-    WriteReg(REG_CTRL2, 0xB0);
-    vTaskDelay(pdMS_TO_TICKS(30));
-
+    // 检查芯片ID（QMI8658A=0x05, QMI8658C=0x30）
     uint8_t id = ReadReg(REG_WHO_AM_I);
-    if (id != WHO_AM_I_VAL) {
-        ESP_LOGE(TAG, "Bad WHO_AM_I: 0x%02X", id);
+    if (id != 0x05 && id != 0x30) {
+        ESP_LOGE(TAG, "Bad WHO_AM_I: 0x%02X (expected 0x05 or 0x30)", id);
         return false;
     }
-    ESP_LOGI(TAG, "WHO_AM_I OK");
+    ESP_LOGI(TAG, "WHO_AM_I OK (0x%02X)", id);
 
-    // 配置加速度计: ±8g, ODR 100Hz
-    WriteReg(REG_CTRL1, 0x60);
-    // 配置陀螺仪: ±2048dps, ODR 100Hz
-    WriteReg(REG_CTRL7, 0x60);
-    // 数据格式: 16-bit
-    WriteReg(REG_CTRL5, 0x00);
-    // 使能加速度计 + 陀螺仪
-    WriteReg(REG_CTRL3, 0x03);
+    // 参照 Arduino QMI8658C 驱动：先关→配→开 顺序
+    // 1. CTRL1: I2C 模式，地址自增
+    WriteReg(REG_CTRL1, 0x40);
 
-    // 比例因子
-    acc_scale_ = 8.0f * 9.80665f / 32768.0f;     // m/s² per LSB
-    gyr_scale_ = 2048.0f * (float)M_PI / 180.0f / 32768.0f;  // rad/s per LSB
+    // 2. CTRL7: 先关闭所有传感器
+    WriteReg(REG_CTRL7, 0x00);
 
-    ESP_LOGI(TAG, "Init OK (acc=±8g, gyr=±2048dps, 100Hz)");
+    // 3. CTRL2: 加速度计 ±2g, ODR 500Hz
+    WriteReg(REG_CTRL2, 0x04);
+
+    // 4. CTRL3: 陀螺仪 ±2048dps, ODR 500Hz
+    WriteReg(REG_CTRL3, 0x64);
+
+    // 5. CTRL5: 使能低通滤波
+    WriteReg(REG_CTRL5, 0x11);
+
+    // 6. CTRL7: 使能加速度计 + 陀螺仪
+    WriteReg(REG_CTRL7, 0x03);
+
+    // 传感器稳定延迟（Arduino参考用2000ms）
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // 验证关键寄存器写入
+    uint8_t v_ctrl1 = ReadReg(REG_CTRL1);
+    uint8_t v_ctrl7 = ReadReg(REG_CTRL7);
+    ESP_LOGI(TAG, "Verify: CTRL1=0x%02X CTRL7=0x%02X", v_ctrl1, v_ctrl7);
+
+    // 比例因子（±2g → 2*9.80665/32768）
+    acc_scale_ = 2.0f * 9.80665f / 32768.0f;
+    gyr_scale_ = 2048.0f * (float)M_PI / 180.0f / 32768.0f;
+
+    ESP_LOGI(TAG, "Init OK (acc=±2g, gyr=±2048dps, 500Hz)");
     return true;
 }
 
 bool Qmi8658::Read(ImuData& data) {
-    // 检查数据就绪
+    // 检查加速度数据就绪（QMI8658C 可能 gyro 就绪较慢，先只检查 accel）
     uint8_t status = ReadReg(REG_STATUS);
+    static int dbg_cnt = 0;
+    if (++dbg_cnt <= 5) ESP_LOGI(TAG, "Status: 0x%02X", status);
     if (!(status & 0x01)) return false;
 
     uint8_t raw[12];
@@ -123,6 +143,7 @@ void imu_task(void* arg) {
 
     ESP_LOGI(TAG, "IMU task started");
 
+    uint32_t dbg_time = 0;
     while (true) {
         ImuData data;
         if (!imu->Read(data)) {
@@ -134,6 +155,13 @@ void imu_task(void* arg) {
                               data.acc_y * data.acc_y +
                               data.acc_z * data.acc_z);
 
+        // 每10秒打印加速度值用于调试
+        if (data.timestamp_ms - dbg_time > 10000) {
+            dbg_time = data.timestamp_ms;
+            ESP_LOGI(TAG, "ACC: x=%.1f y=%.1f z=%.1f mag=%.2f",
+                     data.acc_x, data.acc_y, data.acc_z, acc_mag);
+        }
+
         // ---- 抬腕亮屏 ----
         if (data.acc_z > 7.0f && !wrist_up) {
             wrist_up = true;
@@ -142,8 +170,8 @@ void imu_task(void* arg) {
         }
         if (data.acc_z < 2.0f) wrist_up = false;
 
-        // ---- 计步 ----
-        if (acc_mag > 12.0f && !step_high &&
+        // ---- 计步（阈值降至 10.8，≈1.1g 额外加速度即可触发） ----
+        if (acc_mag > 10.8f && !step_high &&
             (data.timestamp_ms - last_step_time > 200)) {
             step_high = true;
             step_count++;
@@ -151,7 +179,7 @@ void imu_task(void* arg) {
             if (ctx->on_step)
                 ctx->on_step(ctx->user_data, step_count);
         }
-        if (acc_mag < 10.5f) step_high = false;
+        if (acc_mag < 10.0f) step_high = false;
 
         // ---- 摇一摇唤醒 ----
         shake_buf[shake_idx] = acc_mag;

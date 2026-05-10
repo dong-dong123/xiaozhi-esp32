@@ -72,11 +72,11 @@ WatchFace::WatchFace(lv_obj_t* parent)
     // ===== 指南针 160x160 圆盘 =====
     CreateCompass(205, 300, 70);
 
-    // ===== 步数 16px 灰色 =====
+    // ===== 步数 20px 灰色 =====
     steps_label_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(steps_label_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_font(steps_label_, &font_puhui_20_4, 0);
     lv_obj_set_style_text_color(steps_label_, C_GRAY, 0);
-    lv_label_set_text(steps_label_, "");
+    lv_label_set_text(steps_label_, "0 步");
     lv_obj_align(steps_label_, LV_ALIGN_BOTTOM_MID, 0, -60);
 
     // ===== 点击区域 + 提示 =====
@@ -87,7 +87,7 @@ WatchFace::WatchFace(lv_obj_t* parent)
     lv_obj_set_style_border_width(tap_area_, 0, 0);
 
     tap_hint_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(tap_hint_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_font(tap_hint_, &font_puhui_20_4, 0);
     lv_obj_set_style_text_color(tap_hint_, C_GRAY, 0);
     lv_label_set_text(tap_hint_, "唤醒语音聊天");
     lv_obj_align(tap_hint_, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -186,26 +186,26 @@ void WatchFace::UpdateCompassPointer() {
 // ==================== 状态栏 ====================
 
 void WatchFace::CreateStatusBar() {
-    // WiFi 图标 — 右侧，20px FontAwesome，避免圆角遮挡
+    // WiFi 图标 — 右侧，20px，往中间靠
     wifi_label_ = lv_label_create(container_);
     lv_obj_set_style_text_font(wifi_label_, &font_awesome_20_4, 0);
     lv_obj_set_style_text_color(wifi_label_, C_WHITE, 0);
     lv_label_set_text(wifi_label_, font_awesome_get_utf8("wifi_slash"));
-    lv_obj_align(wifi_label_, LV_ALIGN_TOP_RIGHT, -90, 2);
+    lv_obj_align(wifi_label_, LV_ALIGN_TOP_RIGHT, -110, 2);
 
     // 电池图标
     battery_icon_ = lv_label_create(container_);
     lv_obj_set_style_text_font(battery_icon_, &font_awesome_20_4, 0);
     lv_obj_set_style_text_color(battery_icon_, C_WHITE, 0);
     lv_label_set_text(battery_icon_, font_awesome_get_utf8("battery_full"));
-    lv_obj_align(battery_icon_, LV_ALIGN_TOP_RIGHT, -55, 2);
+    lv_obj_align(battery_icon_, LV_ALIGN_TOP_RIGHT, -70, 2);
 
     // 电池百分比
     battery_label_ = lv_label_create(container_);
     lv_obj_set_style_text_font(battery_label_, &font_puhui_16_4, 0);
     lv_obj_set_style_text_color(battery_label_, C_WHITE, 0);
     lv_label_set_text(battery_label_, "--%");
-    lv_obj_align(battery_label_, LV_ALIGN_TOP_RIGHT, -20, 2);
+    lv_obj_align(battery_label_, LV_ALIGN_TOP_RIGHT, -35, 2);
 }
 
 void WatchFace::UpdateStatusBar() {
@@ -273,13 +273,13 @@ void WatchFace::UpdateClock() {
 // ==================== 天气 ====================
 
 const char* WatchFace::WeatherIcon(const char* desc) {
-    if (!desc) return "";
+    if (!desc) return "sun";
     if (strstr(desc, "Thunder")||strstr(desc,"雷")) return "cloud_bolt";
-    if (strstr(desc, "Rain")||strstr(desc,"雨")||strstr(desc,"Shower")) return "cloud_rain";
-    if (strstr(desc, "Drizzle")) return "cloud_drizzle";
+    if (strstr(desc, "Rain")||strstr(desc,"雨")||strstr(desc,"Shower")||strstr(desc,"Drizzle")) return "cloud_rain";
     if (strstr(desc, "Snow")||strstr(desc,"雪")) return "snowflake";
-    if (strstr(desc, "Mist")||strstr(desc,"Fog")||strstr(desc,"雾")||strstr(desc,"Haze")) return "cloud_fog";
-    if (strstr(desc, "Cloud")||strstr(desc,"云")||strstr(desc,"Overcast")) return "cloud_sun";
+    if (strstr(desc, "Mist")||strstr(desc,"Fog")||strstr(desc,"雾")||strstr(desc,"Haze")) return "smog";
+    if (strstr(desc, "Overcast")) return "clouds";
+    if (strstr(desc, "Cloud")||strstr(desc,"云")||strstr(desc,"Partly")) return "cloud_sun";
     if (strstr(desc, "Sun")||strstr(desc,"晴")||strstr(desc,"Clear")) return "sun";
     return "sun";
 }
@@ -291,22 +291,26 @@ void WatchFace::UpdateWeather(const char* desc, int temp_c) {
         lv_label_set_text(weather_icon_, fa_utf8);
     }
 
-    if (desc && desc[0]) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s  %d°C", desc, temp_c);
-        lv_label_set_text(weather_label_, buf);
-    }
+    // 英文描述翻译成中文
+    const char* cn_desc = desc ? desc : "";
+    if (strstr(desc, "Sunny")||strstr(desc,"Clear")) cn_desc = "晴";
+    else if (strstr(desc, "Partly")||strstr(desc,"Cloud")) cn_desc = "多云";
+    else if (strstr(desc, "Overcast")) cn_desc = "阴";
+    else if (strstr(desc, "Rain")||strstr(desc,"Drizzle")||strstr(desc,"Shower")) cn_desc = "雨";
+    else if (strstr(desc, "Thunder")) cn_desc = "雷雨";
+    else if (strstr(desc, "Snow")) cn_desc = "雪";
+    else if (strstr(desc, "Mist")||strstr(desc,"Fog")||strstr(desc,"Haze")) cn_desc = "雾";
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s  %d°C", cn_desc, temp_c);
+    lv_label_set_text(weather_label_, buf);
 }
 
 // ==================== 步数 ====================
 
 void WatchFace::UpdateSteps(int steps) {
-    if (steps <= 0) {
-        lv_label_set_text(steps_label_, "");
-        return;
-    }
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d 步", steps);
+    snprintf(buf, sizeof(buf), "%d 步", steps >= 0 ? steps : 0);
     lv_label_set_text(steps_label_, buf);
 }
 

@@ -1,55 +1,97 @@
-# CustomWatchS3 问题解决记录
+# CustomWatchS3 问题总结
 
-## 已解决问题
+## 已解决
 
-### 1. CO5300 显示屏间歇性极暗
+### 1. 全中文版字体编译后固件过大
 
-**根因**: CO5300 面板自动休眠（APS 硬件定时器），`0x11`(Sleep Out) 仅 init 时发送一次，面板超时后自行休眠无人唤醒。
+**现象**: 使用 `font_puhui_20_4` 等全中文版字体，固件 7.4MB 超过 OTA 分区 4MB
 
 **修复**: 
-- `custom_watch_s3.cc`: 用 `esp_timer` 每 5 秒调用 `esp_lcd_panel_disp_on_off(panel_, true)`，发送 DCS `0x29`(Display On) 命令在硬件寄存器层面保持面板唤醒。
-- `esp_timer` 运行在 `ESP_TIMER_TASK` 上下文，优先级独立于 LVGL 任务，语音聊天时也不会被饿死。
+- 新建 `partitions/v2/16m_watch.csv`：ota_0/ota_1 各扩至 7.2MB，assets 缩至 1.6MB
+- sdkconfig 指向新分区表
+- 策略：LcdDisplay 用 `font_puhui_basic_*`（聊天 UI 够用），WatchFace 用 `font_puhui_*`（全中文）
 
-### 2. 聊天时文字闪烁/颜色乱码残留
+### 2. LVGL Canvas 指南针不渲染
 
-**根因**: LVGL flush 回调中 `lv_draw_sw_rgb565_swap(px, w*h)` 原地修改了 LVGL 渲染缓冲区。`LV_DISPLAY_RENDER_MODE_PARTIAL` 模式下 LVGL 复用缓冲区，非脏区域的像素数据已被字节交换破坏。后续文字抗锯齿混合时读取到错误的背景色 → 闪烁/残留。
+**现象**: `lv_canvas` 在此 CO5300 + QSPI 硬件上完全不显示
+
+**修复**: 重写指南针为纯 LVGL 对象组合（`lv_obj` 圆环 + `lv_line` 指针 + `lv_label` 方向标记）
+
+### 3. Chat 消息字体不显示中文
+
+**根因**: `font_puhui_basic_*` 不含中文字形，中文字符渲染为空
+
+**修复**: WatchFace 独立 `LV_FONT_DECLARE(font_puhui_30_4)` 等全中文版字体
+
+### 4. 聊天时文字闪烁/颜色乱码残留
+
+**根因**: `lv_draw_sw_rgb565_swap(px, w*h)` 原地修改了 LVGL 渲染缓存。`LV_DISPLAY_RENDER_MODE_PARTIAL` 模式下 LVGL 复用缓存，非脏区域像素数据已被字节交换污染。
+
+**修复**: `custom_watch_s3.cc` flush 回调改为先 `memcpy` 到独立 DMA 缓存再 swap，LVGL 原始缓存保持干净。
+
+### 5. 聊天退下后无法切回手表界面
+
+**根因**: 聊天结束后 `blink_timer` 残留的 LcdDisplay 表情遮挡了 WatchFace。后来还有一个根因是 CO5300 休眠（问题 7）。
+
+**修复**: 
+- 移除 idle 时的 `SetEmotion()` 调用
+- 使用 `show_watch` 条件（idle/starting/configuring/activating）完整覆盖
+
+### 6. 聊天中 CO5300 息屏
+
+**根因**: 表盘模式有时钟每 1 秒刷新自然产生 SPI 通信，但聊天模式表盘隐藏 + 无持续刷新 → CO5300 APS 硬件定时器超时自睡。
+
+**修复**: `lv_timer` 每 3 秒 `lv_obj_invalidate(lv_scr_act())`——聊天和表盘模式下都触发 LVGL 渲染产生像素数据传输。
+
+### 7. 天气不显示
+
+**根因**:
+- 最早 `StartWeatherTimer()` 因调试崩溃被注释
+- 启用后 `http->ReadAll()` 无限阻塞（wttr.in 纯 HTTP 连接不发数据）
+- `esp_http_client` 10 秒超时不够（wttr.in 响应 39KB 需 20+ 秒）
+- 温度 `valuedouble` 解析字符串失败显示 0°C
 
 **修复**:
-- `custom_watch_s3.cc`: Flush 回调改为先 `memcpy` 像素到独立 DMA 缓冲区，在副本上做字节交换后发送。LVGL 原始缓冲区保持干净。
+- 改用 `esp_http_client` API，30 秒超时，跳过证书验证
+- HTTP 在独立 FreeRTOS 任务执行，不阻塞应用调度器
+- 温度用 `atoi(valuestring)` 解析
+- 天气描述翻译为中文（Partly cloudy→多云 等）
+- FontAwesome 天气图标映射修复
+- CMakeLists.txt 添加 `esp_http_client` 依赖
 
-### 3. 聊天退下后无法切回手表界面
+### 8. QMI8658 寄存器映射错误
 
-**根因**: 问题 1 的延续——CO5300 面板已经休眠，软件层面 `watch_face_->Show()` 正常执行但屏幕不亮。
+**根因**: 对照官方 Arduino QMI8658C 参考驱动，发现寄存器地址全部错位：
+- 软复位写到加速度配置寄存器（0x03 而非 0x60）
+- 传感器使能写到陀螺仪配置寄存器（0x04 而非 0x08）
+- 传感器从未通电（CTRL7 bit[1:0]=00）
 
-**修复**: 问题 1 修好后自行解决。
+**修复**: 对照数据手册重写 Init()，加入 REG_RESET (0x60)，正确 CTRL2/CTRL3/CTRL7 地址
 
-### 4. Chat 消息字体不显示中文 / 日期显示 "510"
+### 9. QMI8658C WHO_AM_I=0x30 不识别
 
-**根因**: `font_puhui_basic_*` 是不含中文字符的精简版字体，中文字符渲染为空。
+**根因**: QMI8658C 变体的 WHO_AM_I 是 0x30（QMI8658A 是 0x05）
 
-**修复**:
-- `CMakeLists.txt`: `BUILTIN_TEXT_FONT` 保持 `font_puhui_basic_20_4`（聊天 UI 够用）
-- `watch_face.cc`: 表盘独立 `LV_FONT_DECLARE(font_puhui_30_4)` 等完整中文版字体
-- `partitions/v2/16m_watch.csv`: OTA 分区从 4MB 扩至 7.2MB 容纳全中文版字体
+**修复**: `Init()` 中同时接受 0x05 和 0x30
 
-### 5. LVGL Canvas 指南针不渲染
+### 10. QMI8658C I2C 寄存器读写失败（部分解决）
 
-**根因**: LVGL Canvas 在此 CO5300 + QSPI 硬件组合上不工作。
+**现象**: WHO_AM_I (0x00) 能读到 0x30，但所有其他寄存器读回都是 0x30。I2C 内部寄存器指针不更新。
 
-**修复**: 重写指南针为纯 LVGL 对象组合（`lv_obj` 圆环 + `lv_line` 指针 + `lv_label` 方向标记）。
+**尝试过**:
+- `i2c_master_transmit_receive`（repeated START）→ 返回 0x30
+- 分步 `transmit` + `receive`（中间 STOP）→ 返回 0x30  
+- I2C 速度 400kHz→100kHz
+- 地址 0x6A↔0x6B
+
+**当前状态**: 芯片在 I2C 上应答但寄存器写不生效，需要逻辑分析仪看总线波形进一步定位。QMI8658 Init 会失败但不阻塞启动。
 
 ---
 
-## 待解决问题
+## 待处理
 
-### 6. 天气不显示
-
-`StartWeatherTimer()` 因之前调试崩溃被注释，天气获取代码完整但未启用。需排查 `StartWeatherTimer()` 安全启用时机。
-
-### 7. 步数不显示
-
-步数依赖 QMI8658 IMU 传感器。`InitializeSensors()` 在 WatchFace 创建前调用会导致堆竞争崩溃（TLSF block_is_last 断言）。需排查：
-- QMI8658/BMM150 驱动是否正确
-- I2C 总线是否有 ACK 响应
-- FreeRTOS 任务栈是否足够
-- 与 LVGL 堆分配是否存在竞争
+| 问题 | 优先级 | 说明 |
+|------|--------|------|
+| QMI8658 计步 | 中 | I2C 寄存器问题解决后才能工作 |
+| BMM150 指南针 | 低 | 待获取数据手册后调试 |
+| 天气图标美化 | 低 | 当前 FontAwesome 图标可接受 |
