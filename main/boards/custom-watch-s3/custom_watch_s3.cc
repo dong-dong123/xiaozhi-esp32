@@ -133,6 +133,7 @@ private:
     i2c_master_bus_handle_t sensor_i2c_bus_;  // I2C_NUM_1
     Button boot_button_;
     esp_lcd_panel_io_handle_t panel_io_;
+    esp_lcd_panel_handle_t panel_;
     LcdDisplay* display_;
     WatchBacklight* backlight_;
     WatchFace* watch_face_;
@@ -201,6 +202,7 @@ private:
             .vendor_config = (void*)&vendor_config,
         };
         ESP_ERROR_CHECK(esp_lcd_new_panel_co5300(panel_io, &panel_config, &panel));
+        panel_ = panel;  // 保存句柄，供防休眠定时器使用
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
         ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel, 22, 0));
@@ -227,31 +229,31 @@ private:
         lv_display_set_buffers(disp, buf1, buf2, buf_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
         lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
         lv_display_set_user_data(disp, panel);
-        static int flush_cnt = 0;
-        static int flush_done_cnt = 0;
         lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-            flush_cnt++;
-            if (flush_cnt <= 3) {
-                ESP_LOGI(TAG, "LVGL flush #%d area=%d,%d-%d,%d (%dx%d)",
-                         flush_cnt, a->x1, a->y1, a->x2, a->y2,
-                         a->x2-a->x1+1, a->y2-a->y1+1);
-            }
             auto *p = (esp_lcd_panel_handle_t)lv_display_get_user_data(d);
             int w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
-            lv_draw_sw_rgb565_swap(px, w * h);
-            esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px);
+            size_t sz = w * h * sizeof(uint16_t);
+            // 使用栈上小缓冲或堆分配避免原地修改 LVGL 渲染缓冲
+            static uint8_t* swap_buf = nullptr;
+            static size_t swap_buf_sz = 0;
+            if (sz > swap_buf_sz) {
+                if (swap_buf) heap_caps_free(swap_buf);
+                swap_buf_sz = sz;
+                swap_buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_DMA);
+            }
+            if (swap_buf) {
+                memcpy(swap_buf, px, sz);
+                lv_draw_sw_rgb565_swap(swap_buf, w * h);
+                esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, swap_buf);
+            } else {
+                esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px);
+            }
         });
-
-        // 每5秒打印 flush 计数（LVGL timer，安全上下文）
-        lv_timer_create([](lv_timer_t* t) {
-            ESP_LOGI(TAG, "FLUSH-MON: flush=%d done=%d", flush_cnt, flush_done_cnt);
-        }, 5000, nullptr);
         lv_display_add_event_cb(disp, lcd_rounder_cb, LV_EVENT_INVALIDATE_AREA, nullptr);
 
         const esp_lcd_panel_io_callbacks_t cbs = {
             .on_color_trans_done = [](esp_lcd_panel_io_handle_t io,
                                        esp_lcd_panel_io_event_data_t *e, void *ctx) -> bool {
-                flush_done_cnt++;
                 lv_display_flush_ready((lv_display_t*)ctx);
                 return false;
             }
@@ -468,7 +470,7 @@ public:
         ESP_LOGI(TAG, "Sensor I2C OK");
         InitializeButtons();
         ESP_LOGI(TAG, "Buttons OK");
-        // 延迟创建手表界面（等 LVGL 渲染稳定）
+        // 延迟创建手表界面（等 LVGL 渲染稳定），传感器在 WatchFace 创建后初始化
         lv_timer_create([](lv_timer_t* t) {
             auto* self = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
             lv_timer_del(t);
@@ -478,22 +480,56 @@ public:
             self->watch_face_ = new WatchFace(parent);
             ESP_LOGI(TAG, "WatchFace created");
 
+            // 防 CO5300 自动休眠：每5秒用 esp_timer（独立于 LVGL）发送 Display On
+            esp_timer_create_args_t awake_args = {};
+            awake_args.callback = [](void* arg) {
+                esp_lcd_panel_disp_on_off((esp_lcd_panel_handle_t)arg, true);
+            };
+            awake_args.arg = self->panel_;
+            awake_args.dispatch_method = ESP_TIMER_TASK;
+            awake_args.name = "co5300_awake";
+            esp_timer_handle_t awake_timer = nullptr;
+            esp_timer_create(&awake_args, &awake_timer);
+            esp_timer_start_periodic(awake_timer, 5000000);  // 5秒
+
+            // TODO: 传感器和天气在后续 PR 中逐步启用
+            // self->InitializeSensors();
+            // self->StartWeatherTimer();
+
             // 触摸唤醒
             lv_obj_add_event_cb(self->watch_face_->GetTapArea(), [](lv_event_t* e) {
                 if (lv_event_get_code(e) == LV_EVENT_CLICKED)
                     Application::GetInstance().ToggleChatState();
             }, LV_EVENT_CLICKED, nullptr);
 
-            // 状态轮询：idle 显示手表，非 idle 隐藏
+            // 状态轮询：idle 显示手表，聊天时隐藏 + 眨眼动画
+            static lv_timer_t* blink_timer = nullptr;
             lv_timer_create([](lv_timer_t* t2) {
                 auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t2));
                 if (!b->watch_face_) return;
                 auto s = Application::GetInstance().GetDeviceState();
-                if (s == kDeviceStateIdle || s == kDeviceStateStarting ||
-                    s == kDeviceStateWifiConfiguring || s == kDeviceStateActivating)
-                    b->watch_face_->Show();
-                else
+                bool show_watch = (s == kDeviceStateIdle || s == kDeviceStateStarting ||
+                                   s == kDeviceStateWifiConfiguring || s == kDeviceStateActivating);
+
+                if (!show_watch) {
                     b->watch_face_->Hide();
+                    // 聊天时启动眨眼动画
+                    if (!blink_timer) {
+                        blink_timer = lv_timer_create([](lv_timer_t* bt) {
+                            static bool eye_open = true;
+                            eye_open = !eye_open;
+                            auto* display = Board::GetInstance().GetDisplay();
+                            if (display) display->SetEmotion(eye_open ? "neutral" : "winking");
+                        }, 2000, nullptr);
+                        lv_timer_set_repeat_count(blink_timer, -1);
+                    }
+                } else {
+                    b->watch_face_->Show();
+                    if (blink_timer) {
+                        lv_timer_del(blink_timer);
+                        blink_timer = nullptr;
+                    }
+                }
             }, 500, self);
         }, 500, this);  // 延迟 500ms
 

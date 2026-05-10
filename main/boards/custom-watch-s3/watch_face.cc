@@ -1,24 +1,32 @@
 #include "watch_face.h"
+#include "application.h"
+#include "device_state.h"
+
+#include <font_awesome.h>
 #include <esp_log.h>
 #include <cstdio>
 #include <cmath>
+#include <ctime>
 
-LV_FONT_DECLARE(font_puhui_basic_30_4);
-LV_FONT_DECLARE(font_puhui_basic_20_4);
+LV_FONT_DECLARE(font_puhui_30_4);
+LV_FONT_DECLARE(font_puhui_20_4);
+LV_FONT_DECLARE(font_puhui_16_4);
+LV_FONT_DECLARE(font_awesome_20_4);
+LV_FONT_DECLARE(font_awesome_30_4);
 
 #define TAG "WatchFace"
 
-static const lv_color_t C_BG    = LV_COLOR_MAKE(0x00, 0x00, 0x00);
-static const lv_color_t C_WHITE = LV_COLOR_MAKE(0xFF, 0xFF, 0xFF);
-static const lv_color_t C_GRAY  = LV_COLOR_MAKE(0x99, 0x99, 0x99);
-static const lv_color_t C_ORANGE= LV_COLOR_MAKE(0xFF, 0x95, 0x00);
+static const lv_color_t C_BG     = LV_COLOR_MAKE(0x00, 0x00, 0x00);
+static const lv_color_t C_WHITE  = LV_COLOR_MAKE(0xFF, 0xFF, 0xFF);
+static const lv_color_t C_GRAY   = LV_COLOR_MAKE(0x99, 0x99, 0x99);
+static const lv_color_t C_ORANGE = LV_COLOR_MAKE(0xFF, 0x95, 0x00);
+
+// ==================== 构造函数 ====================
 
 WatchFace::WatchFace(lv_obj_t* parent)
     : compass_heading_(0)
 {
-    const lv_font_t* font_small = &font_puhui_basic_20_4;
-
-    // 全屏容器——LVGL 最顶层
+    // 全屏容器
     container_ = lv_obj_create(parent);
     lv_obj_remove_style_all(container_);
     lv_obj_set_size(container_, 410, 502);
@@ -30,48 +38,48 @@ WatchFace::WatchFace(lv_obj_t* parent)
     lv_obj_center(container_);
     lv_obj_move_foreground(container_);
 
-    // ===== 大时钟 — 30px =====
+    // ===== 状态栏：WiFi + 电池 =====
+    CreateStatusBar();
+
+    // ===== 时钟 30px 白色 =====
     clock_label_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(clock_label_, &font_puhui_basic_30_4, 0);
+    lv_obj_set_style_text_font(clock_label_, &font_puhui_30_4, 0);
     lv_obj_set_style_text_color(clock_label_, C_WHITE, 0);
     lv_label_set_text(clock_label_, "--:--");
-    lv_obj_align(clock_label_, LV_ALIGN_TOP_MID, 0, 50);
+    lv_obj_align(clock_label_, LV_ALIGN_TOP_MID, 0, 55);
 
-    // ===== 日期 =====
+    // ===== 日期 20px 橙色，中文 =====
     date_label_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(date_label_, font_small, 0);
+    lv_obj_set_style_text_font(date_label_, &font_puhui_20_4, 0);
     lv_obj_set_style_text_color(date_label_, C_ORANGE, 0);
-    lv_label_set_text(date_label_, "5/9 Fri");
+    lv_label_set_text(date_label_, "--");
     lv_obj_align(date_label_, LV_ALIGN_TOP_MID, 0, 115);
 
-    // ===== 天气行 =====
+    // ===== 天气图标 30px FontAwesome =====
+    weather_icon_ = lv_label_create(container_);
+    lv_obj_set_style_text_font(weather_icon_, &font_awesome_30_4, 0);
+    lv_obj_set_style_text_color(weather_icon_, C_WHITE, 0);
+    lv_label_set_text(weather_icon_, "");
+    lv_obj_align(weather_icon_, LV_ALIGN_TOP_MID, -60, 155);
+
+    // ===== 天气文字 20px 灰色 =====
     weather_label_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(weather_label_, font_small, 0);
+    lv_obj_set_style_text_font(weather_label_, &font_puhui_20_4, 0);
     lv_obj_set_style_text_color(weather_label_, C_GRAY, 0);
     lv_label_set_text(weather_label_, "");
-    lv_obj_align(weather_label_, LV_ALIGN_TOP_MID, 0, 145);
+    lv_obj_align(weather_label_, LV_ALIGN_TOP_MID, 30, 155);
 
-    // ===== 指南针 100x100 =====
-    compass_canvas_ = lv_canvas_create(container_);
-    lv_obj_set_size(compass_canvas_, 100, 100);
-    lv_obj_align(compass_canvas_, LV_ALIGN_CENTER, 0, 60);
+    // ===== 指南针 160x160 圆盘 =====
+    CreateCompass(205, 300, 70);
 
-    compass_draw_buf_ = (lv_draw_buf_t*)malloc(
-        sizeof(lv_draw_buf_t) + 100 * 100 * sizeof(lv_color_t));
-    if (compass_draw_buf_) {
-        memset(compass_draw_buf_, 0, sizeof(lv_draw_buf_t) + 100 * 100 * sizeof(lv_color_t));
-        compass_draw_buf_->header.w = 100;
-        compass_draw_buf_->header.h = 100;
-        compass_draw_buf_->header.cf = LV_COLOR_FORMAT_RGB565;
-        compass_draw_buf_->header.stride = 100 * sizeof(lv_color_t);
-        compass_draw_buf_->data_size = 100 * 100 * sizeof(lv_color_t);
-        compass_draw_buf_->data = (uint8_t*)(compass_draw_buf_ + 1);
-        compass_draw_buf_->unaligned_data = compass_draw_buf_->data;
-        lv_canvas_set_draw_buf(compass_canvas_, compass_draw_buf_);
-    }
-    DrawCompass();
+    // ===== 步数 16px 灰色 =====
+    steps_label_ = lv_label_create(container_);
+    lv_obj_set_style_text_font(steps_label_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(steps_label_, C_GRAY, 0);
+    lv_label_set_text(steps_label_, "");
+    lv_obj_align(steps_label_, LV_ALIGN_BOTTOM_MID, 0, -60);
 
-    // ===== 点击区域 =====
+    // ===== 点击区域 + 提示 =====
     tap_area_ = lv_obj_create(container_);
     lv_obj_set_size(tap_area_, 410, 50);
     lv_obj_align(tap_area_, LV_ALIGN_BOTTOM_MID, 0, 0);
@@ -79,73 +87,158 @@ WatchFace::WatchFace(lv_obj_t* parent)
     lv_obj_set_style_border_width(tap_area_, 0, 0);
 
     tap_hint_ = lv_label_create(container_);
-    lv_obj_set_style_text_font(tap_hint_, font_small, 0);
+    lv_obj_set_style_text_font(tap_hint_, &font_puhui_16_4, 0);
     lv_obj_set_style_text_color(tap_hint_, C_GRAY, 0);
-    lv_label_set_text(tap_hint_, "Tap to wake");
+    lv_label_set_text(tap_hint_, "唤醒语音聊天");
     lv_obj_align(tap_hint_, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     // 1秒刷新时钟
     clock_timer_ = lv_timer_create(ClockTimerCB, 1000, this);
     UpdateClock();
 
-    ESP_LOGI(TAG, "WatchFace created");
-    // 诊断日志：打印所有元素的实际位置和可见状态
-    ESP_LOGI(TAG, "DIAG: container=%p vis=%d pos=%d,%d size=%dx%d parent=%dx%d",
-             container_, !lv_obj_has_flag(container_, LV_OBJ_FLAG_HIDDEN),
-             lv_obj_get_x(container_), lv_obj_get_y(container_),
-             lv_obj_get_width(container_), lv_obj_get_height(container_),
-             lv_obj_get_width(parent), lv_obj_get_height(parent));
-    auto log_label = [](const char* name, lv_obj_t* obj) {
-        if (!obj) return;
-        ESP_LOGI(TAG, "DIAG: %s=%p vis=%d pos=%d,%d size=%dx%d",
-                 name, obj, !lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(obj), lv_obj_get_y(obj),
-                 lv_obj_get_width(obj), lv_obj_get_height(obj));
-    };
-    log_label("clock", clock_label_);
-    log_label("date", date_label_);
-    log_label("weather", weather_label_);
-    log_label("compass", compass_canvas_);
-    log_label("tap", tap_hint_);
-    ESP_LOGI(TAG, "DIAG: layer_top=%p scr_act=%p", lv_layer_top(), lv_scr_act());
+    // 5秒刷新状态栏
+    status_timer_ = lv_timer_create(StatusTimerCB, 5000, this);
+    UpdateStatusBar();
 
-    // 延迟诊断：等 LVGL 渲染首帧后再检查实际尺寸
-    lv_timer_create([](lv_timer_t* t) {
-        auto* wf = static_cast<WatchFace*>(lv_timer_get_user_data(t));
-        lv_timer_del(t);
-        ESP_LOGI(TAG, "DIAG2: ===== After LVGL render =====");
-        ESP_LOGI(TAG, "DIAG2: container=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->container_, !lv_obj_has_flag(wf->container_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->container_), lv_obj_get_y(wf->container_),
-                 lv_obj_get_width(wf->container_), lv_obj_get_height(wf->container_));
-        ESP_LOGI(TAG, "DIAG2: clock=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->clock_label_, !lv_obj_has_flag(wf->clock_label_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->clock_label_), lv_obj_get_y(wf->clock_label_),
-                 lv_obj_get_width(wf->clock_label_), lv_obj_get_height(wf->clock_label_));
-        ESP_LOGI(TAG, "DIAG2: date=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->date_label_, !lv_obj_has_flag(wf->date_label_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->date_label_), lv_obj_get_y(wf->date_label_),
-                 lv_obj_get_width(wf->date_label_), lv_obj_get_height(wf->date_label_));
-        ESP_LOGI(TAG, "DIAG2: weather=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->weather_label_, !lv_obj_has_flag(wf->weather_label_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->weather_label_), lv_obj_get_y(wf->weather_label_),
-                 lv_obj_get_width(wf->weather_label_), lv_obj_get_height(wf->weather_label_));
-        ESP_LOGI(TAG, "DIAG2: compass=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->compass_canvas_, !lv_obj_has_flag(wf->compass_canvas_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->compass_canvas_), lv_obj_get_y(wf->compass_canvas_),
-                 lv_obj_get_width(wf->compass_canvas_), lv_obj_get_height(wf->compass_canvas_));
-        ESP_LOGI(TAG, "DIAG2: tap=%p vis=%d pos=%d,%d size=%dx%d",
-                 wf->tap_hint_, !lv_obj_has_flag(wf->tap_hint_, LV_OBJ_FLAG_HIDDEN),
-                 lv_obj_get_x(wf->tap_hint_), lv_obj_get_y(wf->tap_hint_),
-                 lv_obj_get_width(wf->tap_hint_), lv_obj_get_height(wf->tap_hint_));
-    }, 1500, this);
+    ESP_LOGI(TAG, "WatchFace created");
 }
+
+// ==================== 指南针创建 ====================
+
+void WatchFace::CreateCompass(int cx, int cy, int radius) {
+    // 父容器
+    compass_cont_ = lv_obj_create(container_);
+    lv_obj_remove_style_all(compass_cont_);
+    lv_obj_set_size(compass_cont_, radius * 2 + 20, radius * 2 + 20);
+    lv_obj_set_style_bg_opa(compass_cont_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(compass_cont_, 0, 0);
+    lv_obj_set_style_pad_all(compass_cont_, 0, 0);
+    lv_obj_set_pos(compass_cont_, cx - radius - 10, cy - radius - 10);
+
+    int mid = radius + 10;  // 容器中心
+
+    // 圆环
+    compass_ring_ = lv_obj_create(compass_cont_);
+    lv_obj_remove_style_all(compass_ring_);
+    lv_obj_set_size(compass_ring_, radius * 2, radius * 2);
+    lv_obj_set_style_bg_opa(compass_ring_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(compass_ring_, 2, 0);
+    lv_obj_set_style_border_color(compass_ring_, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_radius(compass_ring_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_center(compass_ring_);
+
+    // 方向标签
+    compass_lbl_n_ = lv_label_create(compass_cont_);
+    lv_obj_set_style_text_font(compass_lbl_n_, &font_puhui_20_4, 0);
+    lv_obj_set_style_text_color(compass_lbl_n_, C_ORANGE, 0);
+    lv_label_set_text(compass_lbl_n_, "N");
+    lv_obj_align(compass_lbl_n_, LV_ALIGN_TOP_MID, 0, -2);
+
+    compass_lbl_s_ = lv_label_create(compass_cont_);
+    lv_obj_set_style_text_font(compass_lbl_s_, &font_puhui_20_4, 0);
+    lv_obj_set_style_text_color(compass_lbl_s_, C_GRAY, 0);
+    lv_label_set_text(compass_lbl_s_, "S");
+    lv_obj_align(compass_lbl_s_, LV_ALIGN_BOTTOM_MID, 0, 2);
+
+    compass_lbl_e_ = lv_label_create(compass_cont_);
+    lv_obj_set_style_text_font(compass_lbl_e_, &font_puhui_20_4, 0);
+    lv_obj_set_style_text_color(compass_lbl_e_, C_GRAY, 0);
+    lv_label_set_text(compass_lbl_e_, "E");
+    lv_obj_align(compass_lbl_e_, LV_ALIGN_RIGHT_MID, -2, 0);
+
+    compass_lbl_w_ = lv_label_create(compass_cont_);
+    lv_obj_set_style_text_font(compass_lbl_w_, &font_puhui_20_4, 0);
+    lv_obj_set_style_text_color(compass_lbl_w_, C_GRAY, 0);
+    lv_label_set_text(compass_lbl_w_, "W");
+    lv_obj_align(compass_lbl_w_, LV_ALIGN_LEFT_MID, 2, 0);
+
+    // 圆心点
+    compass_dot_ = lv_obj_create(compass_cont_);
+    lv_obj_remove_style_all(compass_dot_);
+    lv_obj_set_size(compass_dot_, 8, 8);
+    lv_obj_set_style_bg_color(compass_dot_, C_ORANGE, 0);
+    lv_obj_set_style_bg_opa(compass_dot_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(compass_dot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(compass_dot_, 0, 0);
+    lv_obj_center(compass_dot_);
+
+    // 指针线
+    compass_pointer_ = lv_line_create(compass_cont_);
+    lv_obj_set_style_line_color(compass_pointer_, C_ORANGE, 0);
+    lv_obj_set_style_line_width(compass_pointer_, 3, 0);
+    lv_obj_set_style_line_rounded(compass_pointer_, true, 0);
+    compass_points_[0] = {mid, mid};  // 中心
+    compass_points_[1] = {mid, mid - radius + 6};  // 初始指北
+    lv_line_set_points(compass_pointer_, compass_points_, 2);
+}
+
+void WatchFace::UpdateCompassPointer() {
+    float rad = (compass_heading_ - 90) * M_PI / 180.0f;
+    int mid = 80;  // (160+20)/2 = 90... wait, let me recalculate
+    // Actually the container is (radius*2+20) = 160, center = 90
+    mid = 90;
+    int len = 60;
+    compass_points_[0] = {mid, mid};
+    compass_points_[1] = {mid + (int)(len * cosf(rad)), mid + (int)(len * sinf(rad))};
+    lv_line_set_points(compass_pointer_, compass_points_, 2);
+}
+
+// ==================== 状态栏 ====================
+
+void WatchFace::CreateStatusBar() {
+    // WiFi 图标 — 右侧，20px FontAwesome，避免圆角遮挡
+    wifi_label_ = lv_label_create(container_);
+    lv_obj_set_style_text_font(wifi_label_, &font_awesome_20_4, 0);
+    lv_obj_set_style_text_color(wifi_label_, C_WHITE, 0);
+    lv_label_set_text(wifi_label_, font_awesome_get_utf8("wifi_slash"));
+    lv_obj_align(wifi_label_, LV_ALIGN_TOP_RIGHT, -90, 2);
+
+    // 电池图标
+    battery_icon_ = lv_label_create(container_);
+    lv_obj_set_style_text_font(battery_icon_, &font_awesome_20_4, 0);
+    lv_obj_set_style_text_color(battery_icon_, C_WHITE, 0);
+    lv_label_set_text(battery_icon_, font_awesome_get_utf8("battery_full"));
+    lv_obj_align(battery_icon_, LV_ALIGN_TOP_RIGHT, -55, 2);
+
+    // 电池百分比
+    battery_label_ = lv_label_create(container_);
+    lv_obj_set_style_text_font(battery_label_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(battery_label_, C_WHITE, 0);
+    lv_label_set_text(battery_label_, "--%");
+    lv_obj_align(battery_label_, LV_ALIGN_TOP_RIGHT, -20, 2);
+}
+
+void WatchFace::UpdateStatusBar() {
+    // WiFi 状态
+    bool wifi_ok = false;
+    auto* app = &Application::GetInstance();
+    if (app) {
+        auto state = app->GetDeviceState();
+        wifi_ok = (state == kDeviceStateIdle || state == kDeviceStateListening ||
+                   state == kDeviceStateSpeaking || state == kDeviceStateConnecting);
+    }
+    lv_label_set_text(wifi_label_, font_awesome_get_utf8(wifi_ok ? "wifi" : "wifi_slash"));
+    lv_obj_set_style_text_color(wifi_label_, wifi_ok ? C_WHITE : lv_color_hex(0x666666), 0);
+
+    // 电池（占位：无电池监控硬件，固定显示 100%）
+    lv_label_set_text(battery_icon_, font_awesome_get_utf8("battery_full"));
+    lv_label_set_text(battery_label_, "100%");
+}
+
+void WatchFace::StatusTimerCB(lv_timer_t* timer) {
+    auto* self = static_cast<WatchFace*>(lv_timer_get_user_data(timer));
+    self->UpdateStatusBar();
+}
+
+// ==================== 析构 ====================
 
 WatchFace::~WatchFace() {
     if (clock_timer_) lv_timer_delete(clock_timer_);
-    if (compass_draw_buf_) free(compass_draw_buf_);
+    if (status_timer_) lv_timer_delete(status_timer_);
     if (container_) lv_obj_delete(container_);
 }
+
+// ==================== 显隐 ====================
 
 void WatchFace::Show() {
     lv_obj_clear_flag(container_, LV_OBJ_FLAG_HIDDEN);
@@ -155,6 +248,8 @@ void WatchFace::Show() {
 void WatchFace::Hide() {
     lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
 }
+
+// ==================== 时钟 ====================
 
 void WatchFace::ClockTimerCB(lv_timer_t* timer) {
     auto* self = static_cast<WatchFace*>(lv_timer_get_user_data(timer));
@@ -170,83 +265,54 @@ void WatchFace::UpdateClock() {
     snprintf(buf, sizeof(buf), "%02d:%02d", tm->tm_hour, tm->tm_min);
     lv_label_set_text(clock_label_, buf);
 
-    const char* wdays[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-    snprintf(buf, sizeof(buf), "%d/%d %s", tm->tm_mon + 1, tm->tm_mday, wdays[tm->tm_wday]);
+    const char* wdays[] = {"周日","周一","周二","周三","周四","周五","周六"};
+    snprintf(buf, sizeof(buf), "%d月%d日 %s", tm->tm_mon + 1, tm->tm_mday, wdays[tm->tm_wday]);
     lv_label_set_text(date_label_, buf);
 }
 
+// ==================== 天气 ====================
+
+const char* WatchFace::WeatherIcon(const char* desc) {
+    if (!desc) return "";
+    if (strstr(desc, "Thunder")||strstr(desc,"雷")) return "cloud_bolt";
+    if (strstr(desc, "Rain")||strstr(desc,"雨")||strstr(desc,"Shower")) return "cloud_rain";
+    if (strstr(desc, "Drizzle")) return "cloud_drizzle";
+    if (strstr(desc, "Snow")||strstr(desc,"雪")) return "snowflake";
+    if (strstr(desc, "Mist")||strstr(desc,"Fog")||strstr(desc,"雾")||strstr(desc,"Haze")) return "cloud_fog";
+    if (strstr(desc, "Cloud")||strstr(desc,"云")||strstr(desc,"Overcast")) return "cloud_sun";
+    if (strstr(desc, "Sun")||strstr(desc,"晴")||strstr(desc,"Clear")) return "sun";
+    return "sun";
+}
+
 void WatchFace::UpdateWeather(const char* desc, int temp_c) {
-    if (!desc || desc[0] == '\0') return;
-    char buf[128];
-    const char* icon = "";
-    if      (strstr(desc, "Sun")||strstr(desc,"晴")) icon = "☀";
-    else if (strstr(desc, "Cloud")||strstr(desc,"云")) icon = "☁";
-    else if (strstr(desc, "Rain")||strstr(desc,"雨")) icon = "🌧";
-    else if (strstr(desc, "Snow")||strstr(desc,"雪")) icon = "❄";
-    else if (strstr(desc, "Mist")||strstr(desc,"Fog")||strstr(desc,"雾")) icon = "🌫";
-    else if (strstr(desc, "Thunder")||strstr(desc,"雷")) icon = "⚡";
-    snprintf(buf, sizeof(buf), "%s  %d°C  %s", icon, temp_c, desc);
-    lv_label_set_text(weather_label_, buf);
-}
-
-void WatchFace::UpdateSteps(int) {}
-
-void WatchFace::DrawCompass() {
-    // TODO: 等 UI 重构后用 LVGL 对象替代 canvas
-}
-
-    lv_layer_t layer;
-    lv_canvas_init_layer(compass_canvas_, &layer);
-
-    // 外圈
-    lv_draw_arc_dsc_t arc_dsc;
-    lv_draw_arc_dsc_init(&arc_dsc);
-    arc_dsc.color = lv_color_hex(0x666666);
-    arc_dsc.width = 2;
-    arc_dsc.radius = 48;
-    arc_dsc.start_angle = 0;
-    arc_dsc.end_angle = 3600;
-    lv_draw_arc(&layer, &arc_dsc);
-
-    // 刻度线
-    for (int i = 0; i < 360; i += 30) {
-        float rad = (i - 90) * M_PI / 180.0f;
-        int inner = (i % 90 == 0) ? 34 : 38;
-        lv_point_precise_t p1 = {50 + (int)(inner * cosf(rad)), 50 + (int)(inner * sinf(rad))};
-        lv_point_precise_t p2 = {50 + (int)(46 * cosf(rad)), 50 + (int)(46 * sinf(rad))};
-        lv_draw_line_dsc_t line_dsc;
-        lv_draw_line_dsc_init(&line_dsc);
-        line_dsc.color = (i % 90 == 0) ? C_WHITE : lv_color_hex(0x888888);
-        line_dsc.width = (i % 90 == 0) ? 2 : 1;
-        line_dsc.p1 = p1; line_dsc.p2 = p2;
-        lv_draw_line(&layer, &line_dsc);
+    const char* fa_icon = WeatherIcon(desc);
+    const char* fa_utf8 = font_awesome_get_utf8(fa_icon);
+    if (fa_utf8 && fa_utf8[0]) {
+        lv_label_set_text(weather_icon_, fa_utf8);
     }
 
-    // 指针
-    float rad = (compass_heading_ - 90) * M_PI / 180.0f;
-    lv_point_precise_t tip = {50 + (int)(42 * cosf(rad)), 50 + (int)(42 * sinf(rad))};
-    lv_point_precise_t base = {50 - (int)(42 * cosf(rad)), 50 - (int)(42 * sinf(rad))};
-    lv_draw_line_dsc_t line_dsc;
-    lv_draw_line_dsc_init(&line_dsc);
-    line_dsc.color = C_ORANGE;
-    line_dsc.width = 3;
-    line_dsc.p1 = base; line_dsc.p2 = tip;
-    lv_draw_line(&layer, &line_dsc);
-
-    // N标记
-    lv_area_t n_area = {42, 0, 58, 18};
-    lv_draw_label_dsc_t lbl;
-    lv_draw_label_dsc_init(&lbl);
-    lbl.color = C_ORANGE;
-    lbl.font = &font_puhui_basic_20_4;
-    lbl.text = "N";
-    lv_draw_label(&layer, &lbl, &n_area);
-
-    lv_canvas_finish_layer(compass_canvas_, &layer);
-    lv_obj_invalidate(compass_canvas_);
+    if (desc && desc[0]) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s  %d°C", desc, temp_c);
+        lv_label_set_text(weather_label_, buf);
+    }
 }
+
+// ==================== 步数 ====================
+
+void WatchFace::UpdateSteps(int steps) {
+    if (steps <= 0) {
+        lv_label_set_text(steps_label_, "");
+        return;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d 步", steps);
+    lv_label_set_text(steps_label_, buf);
+}
+
+// ==================== 指南针 ====================
 
 void WatchFace::UpdateCompass(float heading_deg) {
     compass_heading_ = heading_deg;
-    DrawCompass();
+    UpdateCompassPointer();
 }

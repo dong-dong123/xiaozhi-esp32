@@ -17,7 +17,11 @@
       "Bash(find \"C:\\\\Users\\\\Admin\\\\Downloads\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\1.51&1.6&1.78&1.96&2.01_AMOLED屏幕驱动\\\\IDF代码\\\\ESP32S3-IDF_AMOLED_LVGL-V8\" -type f -name \"*.c\" -o -name \"*.h\" -o -name \"*.txt\" -o -name \"*.md\" 2>/dev/null | sort)",
       "Bash(grep -A 40 \"typedef struct {\" \"C:\\\\Espressif\\\\frameworks\\\\esp-idf-v5.5.4\\\\components\\\\driver\\\\spi\\\\include\\\\driver\\\\spi_common.h\" | head -50 2>/dev/null || grep -A 40 \"spi_bus_config_t\" \"C:\\\\Espressif\\\\frameworks\\\\esp-idf-v5.5.4\\\\components\\\\esp_driver_spi\\\\include\\\\driver\\\\spi_common.h\" | head -50)",
       "Read(//c/Espressif/frameworks/esp-idf-v5.5.4/components/driver/spi/include/driver/**)",
-      "Read(//c/Espressif/frameworks/esp-idf-v5.5.4/components/esp_driver_spi/include/driver/**)"
+      "Read(//c/Espressif/frameworks/esp-idf-v5.5.4/components/esp_driver_spi/include/driver/**)",
+      "Bash(ls \"C:\\\\Users\\\\Admin\\\\Downloads\\\\ESP32-S3-Display开发板资料\\\\ESP32-S3-Display开发板资料\\\\ESP-IDF代码\")",
+      "Read(//c/Users/Admin/Downloads/ESP32-S3-Display开发板资料/ESP32-S3-Display开发板资料/ESP-IDF代码/**)",
+      "Bash(dir \"c:\\\\Users\\\\Admin\\\\Desktop\\\\AIxiaozhi\\\\xiaozhi-esp32\\\\managed_components\\\\78__xiaozhi-fonts\\\\src\\\\font_puhui*\")",
+      "Bash(dir \"c:/Users/Admin/Desktop/AIxiaozhi/xiaozhi-esp32/managed_components/78__xiaozhi-fonts/src/font_puhui*\")"
     ]
   }
 }
