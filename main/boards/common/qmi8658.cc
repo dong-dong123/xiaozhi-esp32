@@ -139,10 +139,11 @@ void imu_task(void* arg) {
 
     bool wrist_up = false;
 
-    // ---- 摇一摇：500ms内峰值计数 ----
-    uint32_t shake_peak_times[8] = {0};
-    int shake_peak_idx = 0;
-    bool shake_above = false;
+    // ---- 摇一摇：检测完整来回周期 ----
+    uint32_t shake_cycle_times[8] = {0};
+    int shake_cycle_idx = 0;
+    bool shake_high = false;
+    bool shake_had_drop = false;
     uint32_t shake_cooldown = 0;
 
     ESP_LOGI(TAG, "IMU task started");
@@ -192,28 +193,34 @@ void imu_task(void* arg) {
         }
         if (acc_mag < 11.0f) step_high = false;
 
-        // ---- 摇一摇唤醒（500ms内≥5次峰值 + 5秒冷却） ----
+        // ---- 摇一摇唤醒（检测完整来回：11g→10g→11g 为一个周期，1s内≥4次） ----
         {
-            if (acc_mag > 12.0f && !shake_above) {
-                shake_above = true;
-                shake_peak_times[shake_peak_idx % 8] = data.timestamp_ms;
-                shake_peak_idx++;
-                int count = 0;
-                for (int i = 0; i < 8; i++) {
-                    if (shake_peak_times[i] != 0 &&
-                        (int32_t)(data.timestamp_ms - shake_peak_times[i]) < 500) {
-                        count++;
+            if (acc_mag > 11.0f && !shake_high) {
+                shake_high = true;
+                if (shake_had_drop) {
+                    shake_had_drop = false;
+                    shake_cycle_times[shake_cycle_idx % 8] = data.timestamp_ms;
+                    shake_cycle_idx++;
+                    int count = 0;
+                    for (int i = 0; i < 8; i++) {
+                        if (shake_cycle_times[i] != 0 &&
+                            (int32_t)(data.timestamp_ms - shake_cycle_times[i]) < 1000) {
+                            count++;
+                        }
+                    }
+                    if (count >= 4 && ctx->on_shake &&
+                        (int32_t)(data.timestamp_ms - shake_cooldown) > 5000) {
+                        ctx->on_shake(ctx->user_data);
+                        shake_cooldown = data.timestamp_ms;
+                        for (int i = 0; i < 8; i++) shake_cycle_times[i] = 0;
+                        shake_cycle_idx = 0;
                     }
                 }
-                if (count >= 5 && ctx->on_shake &&
-                    (int32_t)(data.timestamp_ms - shake_cooldown) > 5000) {
-                    ctx->on_shake(ctx->user_data);
-                    shake_cooldown = data.timestamp_ms;
-                    for (int i = 0; i < 8; i++) shake_peak_times[i] = 0;
-                    shake_peak_idx = 0;
-                }
             }
-            if (acc_mag < 10.0f) shake_above = false;
+            if (acc_mag < 10.0f && shake_high) {
+                shake_high = false;
+                shake_had_drop = true;
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
