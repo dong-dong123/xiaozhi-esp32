@@ -186,6 +186,16 @@ void WatchFace::UpdateCompassPointer() {
 // ==================== 状态栏 ====================
 
 void WatchFace::CreateStatusBar() {
+    // 状态栏纯黑背景条（宽度覆盖全屏，确保消除GRAM白条残留）
+    lv_obj_t* status_bg = lv_obj_create(container_);
+    lv_obj_remove_style_all(status_bg);
+    lv_obj_set_size(status_bg, 410, 24);
+    lv_obj_set_pos(status_bg, 0, 0);
+    lv_obj_set_style_bg_color(status_bg, C_BG, 0);
+    lv_obj_set_style_bg_opa(status_bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(status_bg, 0, 0);
+    lv_obj_set_style_radius(status_bg, 0, 0);
+
     // WiFi 图标 — 右侧，20px，往中间靠
     wifi_label_ = lv_label_create(container_);
     lv_obj_set_style_text_font(wifi_label_, &font_awesome_20_4, 0);
@@ -243,6 +253,8 @@ WatchFace::~WatchFace() {
 void WatchFace::Show() {
     lv_obj_clear_flag(container_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(container_);
+    // 强制全屏刷新：PARTIAL模式下GRAM可能残留聊天UI数据
+    lv_obj_invalidate(container_);
 }
 
 void WatchFace::Hide() {

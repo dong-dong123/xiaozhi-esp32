@@ -137,9 +137,13 @@ void imu_task(void* arg) {
     bool step_high = false;
     uint32_t last_step_time = 0;
 
-    float shake_buf[10] = {};
-    int shake_idx = 0;
     bool wrist_up = false;
+
+    // ---- 摇一摇：500ms内峰值计数 ----
+    uint32_t shake_peak_times[8] = {0};
+    int shake_peak_idx = 0;
+    bool shake_above = false;
+    uint32_t shake_cooldown = 0;
 
     ESP_LOGI(TAG, "IMU task started");
 
@@ -154,6 +158,13 @@ void imu_task(void* arg) {
         float acc_mag = sqrtf(data.acc_x * data.acc_x +
                               data.acc_y * data.acc_y +
                               data.acc_z * data.acc_z);
+
+        // 过滤传感器饱和/错误值（±2g量程下饱和值约为-19.6）
+        if (data.acc_x < -16.0f || data.acc_y < -16.0f || data.acc_z < -16.0f ||
+            data.acc_x > 16.0f || data.acc_y > 16.0f || data.acc_z > 16.0f) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
 
         // 每10秒打印加速度值用于调试
         if (data.timestamp_ms - dbg_time > 10000) {
@@ -170,32 +181,39 @@ void imu_task(void* arg) {
         }
         if (data.acc_z < 2.0f) wrist_up = false;
 
-        // ---- 计步（阈值降至 10.8，≈1.1g 额外加速度即可触发） ----
-        if (acc_mag > 10.8f && !step_high &&
-            (data.timestamp_ms - last_step_time > 200)) {
+        // ---- 计步（阈值 13.0，需明显步伐） ----
+        if (acc_mag > 13.0f && !step_high &&
+            (data.timestamp_ms - last_step_time > 500)) {
             step_high = true;
             step_count++;
             last_step_time = data.timestamp_ms;
             if (ctx->on_step)
                 ctx->on_step(ctx->user_data, step_count);
         }
-        if (acc_mag < 10.0f) step_high = false;
+        if (acc_mag < 11.0f) step_high = false;
 
-        // ---- 摇一摇唤醒 ----
-        shake_buf[shake_idx] = acc_mag;
-        shake_idx = (shake_idx + 1) % 10;
-        float mean = 0;
-        for (int i = 0; i < 10; i++) mean += shake_buf[i];
-        mean /= 10.0f;
-        float var = 0;
-        for (int i = 0; i < 10; i++) {
-            float d = shake_buf[i] - mean;
-            var += d * d;
-        }
-        var /= 10.0f;
-        if (var > 30.0f) {
-            if (ctx->on_shake)
-                ctx->on_shake(ctx->user_data);
+        // ---- 摇一摇唤醒（500ms内≥5次峰值 + 5秒冷却） ----
+        {
+            if (acc_mag > 12.0f && !shake_above) {
+                shake_above = true;
+                shake_peak_times[shake_peak_idx % 8] = data.timestamp_ms;
+                shake_peak_idx++;
+                int count = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (shake_peak_times[i] != 0 &&
+                        (int32_t)(data.timestamp_ms - shake_peak_times[i]) < 500) {
+                        count++;
+                    }
+                }
+                if (count >= 5 && ctx->on_shake &&
+                    (int32_t)(data.timestamp_ms - shake_cooldown) > 5000) {
+                    ctx->on_shake(ctx->user_data);
+                    shake_cooldown = data.timestamp_ms;
+                    for (int i = 0; i < 8; i++) shake_peak_times[i] = 0;
+                    shake_peak_idx = 0;
+                }
+            }
+            if (acc_mag < 10.0f) shake_above = false;
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));

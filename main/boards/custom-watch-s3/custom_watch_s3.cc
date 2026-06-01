@@ -26,48 +26,99 @@
 #include <http.h>
 #include <esp_http_client.h>
 #include <lvgl.h>
+#include <cmath>
 extern "C" void lv_draw_sw_rgb565_swap(void *buf, uint32_t buf_size);
 #define TAG "CustomWatchS3"
 
-// NS4168 专用 16-bit I2S：TX 立体声双声道输出，RX 只读左声道（MS4030 右声道三态=噪声）
-class NS4168AudioCodec : public NoAudioCodec {
+// 面板互斥锁 — 必须用无捕获 lambda 作为 C 回调，所以用 static 变量中转
+static SemaphoreHandle_t s_panel_mutex = nullptr;
+
+// ==================== 16-bit 立体声双 I2S 编解码器 ====================
+// I2S_NUM_0 TX → NS4168 功放，I2S_NUM_1 RX → MS4030 麦克风
+class CustomWatchAudioCodec : public NoAudioCodec {
 public:
-    NS4168AudioCodec(int input_rate, int output_rate, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din) {
+    // Read: 从 16-bit stereo FIFO word 中提取左声道 (L/R=GND)
+    int Read(int16_t* dest, int samples) override {
+        std::vector<int32_t> buf(samples);
+        size_t bytes_read = 0;
+        if (i2s_channel_read(rx_handle_, buf.data(),
+                              samples * sizeof(int32_t), &bytes_read,
+                              pdMS_TO_TICKS(200)) != ESP_OK)
+            return 0;
+        int n = bytes_read / sizeof(int32_t);
+        for (int i = 0; i < n; i++)
+            dest[i] = (int16_t)(buf[i] & 0xFFFF);  // left=[15:0]
+        return n;
+    }
+
+    // Write: 左右声道填入相同数据，消除基类 stereo 混叠杂音
+    int Write(const int16_t* data, int samples) override {
+        std::lock_guard<std::mutex> lock(data_if_mutex_);
+        int32_t vf = pow(double(output_volume_) / 100.0, 2) * 65536;
+        std::vector<int32_t> buf(samples);
+        for (int i = 0; i < samples; i++) {
+            int64_t temp = int64_t(data[i]) * vf;
+            int16_t audio = (temp > INT32_MAX) ? INT16_MAX :
+                            (temp < INT32_MIN) ? -INT16_MAX :
+                            (int16_t)(static_cast<int32_t>(temp) >> 16);
+            buf[i] = ((int32_t)audio << 16) | ((int32_t)audio & 0xFFFF);
+        }
+        size_t written;
+        i2s_channel_write(tx_handle_, buf.data(), samples * sizeof(int32_t),
+                          &written, portMAX_DELAY);
+        return written / sizeof(int32_t);
+    }
+
+    CustomWatchAudioCodec(int input_rate, int output_rate,
+                          gpio_num_t spk_bclk, gpio_num_t spk_ws, gpio_num_t spk_dout,
+                          gpio_num_t mic_bclk, gpio_num_t mic_ws, gpio_num_t mic_din) {
         duplex_ = true;
         input_sample_rate_ = input_rate;
         output_sample_rate_ = output_rate;
 
-        i2s_chan_config_t chan_cfg = {
+        // TX: I2S_NUM_0 → NS4168 (16-bit 立体声)
+        i2s_chan_config_t tx_chan = {
             .id = I2S_NUM_0, .role = I2S_ROLE_MASTER,
             .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
             .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
             .auto_clear_after_cb = true, .auto_clear_before_cb = false, .intr_priority = 0,
         };
-        ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle_, &rx_handle_));
+        ESP_ERROR_CHECK(i2s_new_channel(&tx_chan, &tx_handle_, nullptr));
 
-        // TX: 16-bit 立体声双声道 → NS4168
         i2s_std_config_t tx_cfg = {
-            .clk_cfg = { .sample_rate_hz = (uint32_t)output_rate, .clk_src = I2S_CLK_SRC_DEFAULT, .mclk_multiple = I2S_MCLK_MULTIPLE_256 },
+            .clk_cfg = { .sample_rate_hz = (uint32_t)output_rate, .clk_src = I2S_CLK_SRC_DEFAULT,
+                         .mclk_multiple = I2S_MCLK_MULTIPLE_256 },
             .slot_cfg = { .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT, .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
                           .slot_mode = I2S_SLOT_MODE_STEREO, .slot_mask = I2S_STD_SLOT_BOTH,
                           .ws_width = I2S_DATA_BIT_WIDTH_16BIT, .ws_pol = false, .bit_shift = true },
-            .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = bclk, .ws = ws, .dout = dout, .din = I2S_GPIO_UNUSED,
+            .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = spk_bclk, .ws = spk_ws, .dout = spk_dout,
+                          .din = I2S_GPIO_UNUSED,
                           .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false } }
         };
         ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &tx_cfg));
 
-        // RX: 16-bit 双声道 ← MS4030（完全对齐 ATK 板配置）
+        // RX: I2S_NUM_1 → MS4030 (16-bit 立体声)
+        i2s_chan_config_t rx_chan = {
+            .id = I2S_NUM_1, .role = I2S_ROLE_MASTER,
+            .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
+            .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
+            .auto_clear_after_cb = true, .auto_clear_before_cb = false, .intr_priority = 0,
+        };
+        ESP_ERROR_CHECK(i2s_new_channel(&rx_chan, nullptr, &rx_handle_));
+
         i2s_std_config_t rx_cfg = {
-            .clk_cfg = { .sample_rate_hz = (uint32_t)output_rate, .clk_src = I2S_CLK_SRC_DEFAULT, .mclk_multiple = I2S_MCLK_MULTIPLE_256 },
+            .clk_cfg = { .sample_rate_hz = (uint32_t)input_rate, .clk_src = I2S_CLK_SRC_DEFAULT,
+                         .mclk_multiple = I2S_MCLK_MULTIPLE_256 },
             .slot_cfg = { .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT, .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
                           .slot_mode = I2S_SLOT_MODE_STEREO, .slot_mask = I2S_STD_SLOT_BOTH,
                           .ws_width = I2S_DATA_BIT_WIDTH_16BIT, .ws_pol = false, .bit_shift = true },
-            .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = bclk, .ws = ws, .dout = I2S_GPIO_UNUSED, .din = din,
+            .gpio_cfg = { .mclk = I2S_GPIO_UNUSED, .bclk = mic_bclk, .ws = mic_ws, .dout = I2S_GPIO_UNUSED,
+                          .din = mic_din,
                           .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false } }
         };
         ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &rx_cfg));
 
-        ESP_LOGI(TAG, "NS4168 Duplex: TX+RX 16bit BOTH");
+        ESP_LOGI(TAG, "Audio: TX=I2S0 RX=I2S1 (16bit stereo)");
     }
 };
 
@@ -99,10 +150,11 @@ static const co5300_lcd_init_cmd_t vendor_specific_init[] = {
     {0x35, (uint8_t[]){0x00}, 1, 0},     // TE off
     {0x53, (uint8_t[]){0x20}, 1, 0},
     {0x51, (uint8_t[]){0xFF}, 1, 0},     // 亮度最大
-    {0x63, (uint8_t[]){0xFF}, 1, 0},
+    {0x63, (uint8_t[]){0xFF}, 1, 0},     // HBM 亮度最大
+    {0x58, (uint8_t[]){0x00}, 1, 10},    // 关闭电源节省模式（禁用APS自动睡眠）
     {0x2A, (uint8_t[]){0x00, 0x16, 0x01, 0xAF}, 4, 0},  // 列 22-431 (410列+偏移22)
     {0x2B, (uint8_t[]){0x00, 0x00, 0x01, 0xF5}, 4, 0},  // 行 0-501
-    {0x36, (uint8_t[]){0x00}, 1, 0},     // MADCTL: 无BGR，靠lv_draw_sw_rgb565_swap
+    {0x36, (uint8_t[]){0x00}, 1, 0},     // MADCTL: 默认字节序，软件swap
     {0x29, (uint8_t[]){0x00}, 0, 600},   // Display on, 600ms
 };
 
@@ -130,9 +182,10 @@ protected:
 // ==================== 主板卡类 ====================
 class CustomWatchS3Board : public WifiBoard {
 private:
-    i2c_master_bus_handle_t touch_i2c_bus_;   // I2C_NUM_0
-    i2c_master_bus_handle_t sensor_i2c_bus_;  // I2C_NUM_1
+    i2c_master_bus_handle_t touch_i2c_bus_;   // I2C_NUM_0 (触摸+传感器+RTC共用)
     Button boot_button_;
+    Button volume_up_button_;
+    Button volume_down_button_;
     esp_lcd_panel_io_handle_t panel_io_;
     esp_lcd_panel_handle_t panel_;
     LcdDisplay* display_;
@@ -144,15 +197,33 @@ private:
 
     // ---- 电源初始化 ----
     void InitializePower() {
-        // 屏幕电源使能
-        gpio_config_t io_conf = {};
-        io_conf.pin_bit_mask = (1ULL << DISPLAY_VCI_EN);
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&io_conf);
-        gpio_set_level(DISPLAY_VCI_EN, 1);
+        // 充电状态检测 (CHECK_CHARGE) — 输入
+        gpio_config_t charge_conf = {};
+        charge_conf.pin_bit_mask = (1ULL << CHECK_CHARGE_PIN);
+        charge_conf.mode = GPIO_MODE_INPUT;
+        charge_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        charge_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        charge_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&charge_conf);
+
+        // 一键开机控制 (OneCLINK_CTARTUP) — 输出
+        gpio_config_t startup_conf = {};
+        startup_conf.pin_bit_mask = (1ULL << ONE_CLICK_STARTUP_PIN);
+        startup_conf.mode = GPIO_MODE_OUTPUT;
+        startup_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        startup_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        startup_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&startup_conf);
+        gpio_set_level(ONE_CLICK_STARTUP_PIN, 0);
+
+        // 电池电压 ADC 检测 — 配置为模拟输入（ADC 初始化由 IDF 自动处理）
+        gpio_config_t bat_adc_conf = {};
+        bat_adc_conf.pin_bit_mask = (1ULL << BAT_CHECK_ADC_PIN);
+        bat_adc_conf.mode = GPIO_MODE_DISABLE;
+        bat_adc_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        bat_adc_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        bat_adc_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&bat_adc_conf);
 
         // GPIO0 加内部上拉（防按键抖动误触下载模式）
         gpio_config_t boot_conf = {};
@@ -230,32 +301,41 @@ private:
         lv_display_set_buffers(disp, buf1, buf2, buf_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
         lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
         lv_display_set_user_data(disp, panel);
+        static int flush_count = 0;
+
+        // PARTIAL模式每次flush ≤ 20行×全宽，静态缓冲区避免堆分配
+        static uint8_t s_swap_buf[DISPLAY_WIDTH * 20 * sizeof(lv_color_t)];
         lv_display_set_flush_cb(disp, [](lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+            flush_count++;
             auto *p = (esp_lcd_panel_handle_t)lv_display_get_user_data(d);
-            int w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
-            size_t sz = w * h * sizeof(uint16_t);
-            // 使用栈上小缓冲或堆分配避免原地修改 LVGL 渲染缓冲
-            static uint8_t* swap_buf = nullptr;
-            static size_t swap_buf_sz = 0;
-            if (sz > swap_buf_sz) {
-                if (swap_buf) heap_caps_free(swap_buf);
-                swap_buf_sz = sz;
-                swap_buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_DMA);
-            }
-            if (swap_buf) {
-                memcpy(swap_buf, px, sz);
-                lv_draw_sw_rgb565_swap(swap_buf, w * h);
-                esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, swap_buf);
+            int w = a->x2 - a->x1 + 1;
+            int h = a->y2 - a->y1 + 1;
+            int sz = w * h * 2;
+            // 获取面板锁，防止与防APS任务并发
+            if (s_panel_mutex) xSemaphoreTake(s_panel_mutex, portMAX_DELAY);
+            if (sz <= (int)sizeof(s_swap_buf)) {
+                memcpy(s_swap_buf, px, sz);
+                lv_draw_sw_rgb565_swap(s_swap_buf, w * h);
+                esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, s_swap_buf);
             } else {
                 esp_lcd_panel_draw_bitmap(p, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px);
             }
         });
+
+        // 每5秒打印 LVGL flush 次数（诊断: 总数 + 近5秒增量）
+        lv_timer_create([](lv_timer_t* t) {
+            int prev = (int)(uintptr_t)lv_timer_get_user_data(t);
+            int delta = flush_count - prev;
+            lv_timer_set_user_data(t, (void*)(uintptr_t)flush_count);
+            ESP_LOGI(TAG, "FLUSH诊断: 总计%d 近5秒+%d", flush_count, delta);
+        }, 5000, nullptr);
         lv_display_add_event_cb(disp, lcd_rounder_cb, LV_EVENT_INVALIDATE_AREA, nullptr);
 
         const esp_lcd_panel_io_callbacks_t cbs = {
             .on_color_trans_done = [](esp_lcd_panel_io_handle_t io,
-                                       esp_lcd_panel_io_event_data_t *e, void *ctx) -> bool {
+                                      esp_lcd_panel_io_event_data_t *e, void *ctx) -> bool {
                 lv_display_flush_ready((lv_display_t*)ctx);
+                if (s_panel_mutex) xSemaphoreGive(s_panel_mutex);
                 return false;
             }
         };
@@ -314,18 +394,6 @@ private:
         ESP_LOGI(TAG, "Touch OK");
     }
 
-    // ---- I2C_NUM_1: 传感器 (BMM150 + QMI8658 共用) ----
-    void InitializeSensorI2c() {
-        i2c_master_bus_config_t cfg = {};
-        cfg.i2c_port = I2C_NUM_1;
-        cfg.sda_io_num = SENSOR_I2C_SDA;
-        cfg.scl_io_num = SENSOR_I2C_SCL;
-        cfg.clk_source = I2C_CLK_SRC_DEFAULT;
-        cfg.flags.enable_internal_pullup = 1;
-        ESP_ERROR_CHECK(i2c_new_master_bus(&cfg, &sensor_i2c_bus_));
-        ESP_LOGI(TAG, "Sensor I2C bus ready (BMM150 + QMI8658)");
-    }
-
     // ---- 按键 ----
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
@@ -336,74 +404,72 @@ private:
             }
             app.ToggleChatState();
         });
+
+        // 音量+ (TODO: 实现音量调节逻辑)
+        volume_up_button_.OnClick([this]() {
+            (void)Application::GetInstance();
+        });
+        volume_up_button_.OnLongPress([this]() {
+            (void)Application::GetInstance();
+        });
+
+        // 音量- (TODO: 实现音量调节逻辑)
+        volume_down_button_.OnClick([this]() {
+            (void)Application::GetInstance();
+        });
+        volume_down_button_.OnLongPress([this]() {
+            (void)Application::GetInstance();
+        });
     }
 
-    // ---- 传感器初始化（BMM150暂屏蔽，QMI8658已修复寄存器） ----
+    // ---- 传感器初始化（BMM150 + QMI8658 共用触摸 I2C，单个任务顺序初始化） ----
     void InitializeSensors() {
-        // TODO: BMM150 — 待获取数据手册后调试
-        // QMI8658 六轴 IMU
         xTaskCreate([](void* arg) {
             auto* self = static_cast<CustomWatchS3Board*>(arg);
-            vTaskDelay(pdMS_TO_TICKS(800));
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
-            auto* qmi = new Qmi8658(self->sensor_i2c_bus_, 0x6A);
-            if (qmi->Init()) {
-                self->qmi8658_ = qmi;
-                auto* ctx = new ImuTaskCtx{
-                    .imu = qmi,
-                    .on_step = OnImuStep,
-                    .on_wrist_up = OnImuWristUp,
-                    .on_shake = OnImuShake,
-                    .user_data = self,
-                };
-                xTaskCreate(imu_task, "imu", 4096, ctx, 2, nullptr);
-                ESP_LOGI(TAG, "QMI8658 OK, IMU started");
-            } else {
-                ESP_LOGW(TAG, "QMI8658 not found - motion disabled");
-                delete qmi;
+            // BMM150 罗盘（I2C 地址 0x13）
+            {
+                auto* bmm = new Bmm150(self->touch_i2c_bus_, 0x13);
+                if (bmm->Init()) {
+                    self->bmm150_ = bmm;
+                    ESP_LOGI(TAG, "BMM150 OK");
+                } else {
+                    ESP_LOGW(TAG, "BMM150 not found");
+                    delete bmm;
+                }
+            }
+
+            // QMI8658 六轴 IMU（I2C 地址 0x6B）
+            {
+                auto* qmi = new Qmi8658(self->touch_i2c_bus_, 0x6B);
+                if (qmi->Init()) {
+                    self->qmi8658_ = qmi;
+                    auto* ctx = new ImuTaskCtx{
+                        .imu = qmi,
+                        .on_step = OnImuStep,
+                        .on_wrist_up = OnImuWristUp,
+                        .on_shake = OnImuShake,
+                        .user_data = self,
+                    };
+                    xTaskCreate(imu_task, "imu", 4096, ctx, 2, nullptr);
+                    ESP_LOGI(TAG, "QMI8658 OK, IMU started");
+                } else {
+                    ESP_LOGW(TAG, "QMI8658 not found - motion disabled");
+                    delete qmi;
+                }
             }
             vTaskDelete(nullptr);
-        }, "qmi", 4096, this, 2, nullptr);
-    }
-
-    // ---- 手表界面 + 触摸唤醒（延迟到 LVGL 就绪后创建） ----
-    void InitializeWatchFace() {
-        lv_timer_create([](lv_timer_t* t) {
-            auto* self = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
-            lv_timer_del(t);
-
-            lv_obj_t* parent = lv_scr_act();
-            self->watch_face_ = new WatchFace(parent);
-
-            // 触摸唤醒
-            lv_obj_add_event_cb(self->watch_face_->GetTapArea(), [](lv_event_t* e) {
-                if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-                    Application::GetInstance().ToggleChatState();
-                }
-            }, LV_EVENT_CLICKED, nullptr);
-
-            // 状态轮询
-            lv_timer_create([](lv_timer_t* t2) {
-                auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t2));
-                auto state = Application::GetInstance().GetDeviceState();
-                if (state == kDeviceStateIdle || state == kDeviceStateStarting ||
-                    state == kDeviceStateWifiConfiguring || state == kDeviceStateActivating) {
-                    b->watch_face_->Show();
-                } else {
-                    b->watch_face_->Hide();
-                }
-            }, 500, self);
-        }, 200, this);  // 延迟 200ms，等 LVGL 渲染首帧完成
+        }, "sensors", 4096, this, 2, nullptr);
     }
 
     void StartWeatherTimer() {
-        // 延迟 15 秒后首次获取（等 MQTT 激活完成），之后每 30 分钟刷新
+        // 15秒后首次获取，之后每30分钟
         lv_timer_t* t = lv_timer_create([](lv_timer_t* timer) {
             StartWeatherFetch(static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(timer)));
-            // 首次触发后改为 30 分钟周期
-            lv_timer_set_period(timer, WEATHER_REFRESH_MS);
+            lv_timer_set_period(timer, 1800000);  // 成功后改为30分钟
         }, 15000, this);
-        lv_timer_set_repeat_count(t, 1);
+        lv_timer_set_repeat_count(t, -1);
     }
 
 public:
@@ -411,12 +477,10 @@ public:
         if (watch_face_) watch_face_->UpdateWeather(desc, temp_c);
     }
 
-    // IMU 回调（在 IMU 任务中调用，通过 Schedule 投递到主线程）
+    // IMU 回调（在 IMU 任务中调用，只存储步数，由 LVGL 定时器刷新显示）
     static void OnImuStep(void* user, int steps) {
         auto* self = static_cast<CustomWatchS3Board*>(user);
-        Application::GetInstance().Schedule([self, steps]() {
-            if (self->watch_face_) self->watch_face_->UpdateSteps(steps);
-        });
+        self->step_count_ = steps;
     }
     static void OnImuWristUp(void* user) {
         auto* self = static_cast<CustomWatchS3Board*>(user);
@@ -430,8 +494,13 @@ public:
         });
     }
 
-    CustomWatchS3Board() : boot_button_(BOOT_BUTTON_GPIO), watch_face_(nullptr),
+    CustomWatchS3Board() : boot_button_(BOOT_BUTTON_GPIO),
+                           volume_up_button_(GPIO_NUM_NC),       // FIXME: 暂时禁用，等按键焊接后再启用
+                           volume_down_button_(GPIO_NUM_NC),     // FIXME: 暂时禁用，等按键焊接后再启用
+                           watch_face_(nullptr),
                            bmm150_(nullptr), qmi8658_(nullptr), step_count_(0) {
+        s_panel_mutex = xSemaphoreCreateBinary();
+        xSemaphoreGive(s_panel_mutex);
         ESP_LOGI(TAG, "=== Board init start ===");
         InitializePower();
         ESP_LOGI(TAG, "Power OK");
@@ -443,8 +512,6 @@ public:
         ESP_LOGI(TAG, "Touch I2C OK");
         InitializeTouch();
         ESP_LOGI(TAG, "Touch OK");
-        InitializeSensorI2c();
-        ESP_LOGI(TAG, "Sensor I2C OK");
         InitializeButtons();
         ESP_LOGI(TAG, "Buttons OK");
         // 延迟创建手表界面（等 LVGL 渲染稳定），传感器在 WatchFace 创建后初始化
@@ -457,16 +524,39 @@ public:
             self->watch_face_ = new WatchFace(parent);
             ESP_LOGI(TAG, "WatchFace created");
 
-            // 防 CO5300 休眠：每3秒触发 LVGL 刷新产生像素数据
-            // 表盘模式：时钟每1秒刷新自然保活；聊天模式：此定时器确保持续通信
-            lv_timer_create([](lv_timer_t* t) {
-                lv_obj_invalidate(lv_scr_act());
-            }, 3000, nullptr);
+            // 防 CO5300 APS 休眠：独立FreeRTOS任务，与LVGL通过信号量互斥
+            {
+                static esp_lcd_panel_handle_t s_keep_panel = self->panel_;
+                xTaskCreate([](void* arg) {
+                    auto* panel = (esp_lcd_panel_handle_t)arg;
+                    uint16_t pixel = 0x0000;
+                    bool flip = false;
+                    while (true) {
+                        flip = !flip;
+                        pixel = flip ? 0x0000 : 0x0001;
+                        if (s_panel_mutex) xSemaphoreTake(s_panel_mutex, pdMS_TO_TICKS(100));
+                        esp_lcd_panel_draw_bitmap(panel, 0, 0, 1, 1, (uint8_t*)&pixel);
+                        if (s_panel_mutex) xSemaphoreGive(s_panel_mutex);
+                        vTaskDelay(pdMS_TO_TICKS(800));
+                    }
+                }, "keep", 4096, s_keep_panel, 10, nullptr);
+            }
+            // 初始化后立即全屏刷新，清除GRAM随机数据
+            lv_obj_invalidate(lv_scr_act());
 
             // 天气：FreeRTOS 任务中做 HTTP，不阻塞调度器
             self->StartWeatherTimer();
             // 传感器（BMM150 + QMI8658 + 指南针定时器）
             self->InitializeSensors();
+
+            // 步数刷新（LVGL 上下文更新，避免从 IMU 回调直接调用 LVGL 函数）
+            {
+                auto* t_step = lv_timer_create([](lv_timer_t* t_s) {
+                    auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t_s));
+                    if (b->watch_face_) b->watch_face_->UpdateSteps(b->step_count_);
+                }, 2000, self);
+                lv_timer_set_repeat_count(t_step, -1);  // 无限重复，每2秒刷新
+            }
 
             // 触摸唤醒
             lv_obj_add_event_cb(self->watch_face_->GetTapArea(), [](lv_event_t* e) {
@@ -476,12 +566,19 @@ public:
 
             // 状态轮询：idle 显示手表，聊天时隐藏 + 眨眼动画
             static lv_timer_t* blink_timer = nullptr;
+            static bool was_showing_watch = true;
             lv_timer_create([](lv_timer_t* t2) {
                 auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t2));
                 if (!b->watch_face_) return;
                 auto s = Application::GetInstance().GetDeviceState();
                 bool show_watch = (s == kDeviceStateIdle || s == kDeviceStateStarting ||
                                    s == kDeviceStateWifiConfiguring || s == kDeviceStateActivating);
+
+                // 模式切换时全屏刷新，清除GRAM残留（手表↔聊天）
+                if (was_showing_watch != show_watch) {
+                    was_showing_watch = show_watch;
+                    lv_obj_invalidate(lv_scr_act());
+                }
 
                 if (!show_watch) {
                     b->watch_face_->Hide();
@@ -509,10 +606,10 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static NoAudioCodecDuplex audio_codec(
+        static CustomWatchAudioCodec audio_codec(
             AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
-            AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
+            SPEAKER_I2S_GPIO_BCLK, SPEAKER_I2S_GPIO_LRC, SPEAKER_I2S_GPIO_DOUT,
+            MIC_I2S_GPIO_BCLK, MIC_I2S_GPIO_WS, MIC_I2S_GPIO_DIN);
         return &audio_codec;
     }
 
@@ -575,6 +672,8 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
                 }
                 cJSON_Delete(root);
             }
+        } else {
+            ESP_LOGW(TAG, "天气获取失败，15秒后重试");
         }
         vTaskDelete(nullptr);
     }, "weather", 8192, board, 1, nullptr);

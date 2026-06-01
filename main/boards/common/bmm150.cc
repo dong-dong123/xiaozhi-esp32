@@ -21,7 +21,8 @@
 Bmm150::Bmm150(i2c_master_bus_handle_t bus, uint8_t addr)
     : bus_(bus), dev_(nullptr), addr_(addr)
 {
-    memset(&dig_x1_, 0, offsetof(Bmm150, bus_) - offsetof(Bmm150, dig_x1_));
+    // 清零所有校准字段 (dig_x1_ ~ dig_xy2_)
+    memset(&dig_x1_, 0, offsetof(Bmm150, dig_xy2_) - offsetof(Bmm150, dig_x1_) + sizeof(dig_xy2_));
 }
 
 Bmm150::~Bmm150() {
