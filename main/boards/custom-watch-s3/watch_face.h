@@ -47,8 +47,8 @@ private:
     lv_obj_t* compass_ring_inner_;
     lv_obj_t* compass_tick_[16];
     lv_point_precise_t compass_tick_pts_[16][2];
-    lv_obj_t* compass_pointer_;       // 北向主针 (lv_line, 3点三角)
-    lv_obj_t* compass_pointer_south_; // 南向副针 (lv_line, 2点)
+    lv_obj_t* compass_pointer_;         // 北向杆
+    lv_obj_t* compass_pointer_south_;   // 南向杆
     lv_obj_t* compass_dot_;           // 中心点
     lv_obj_t* compass_lbl_n_, *compass_lbl_s_, *compass_lbl_e_, *compass_lbl_w_;
     lv_obj_t* compass_heading_label_;

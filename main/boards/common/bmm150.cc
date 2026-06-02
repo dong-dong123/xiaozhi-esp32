@@ -46,11 +46,11 @@ void Bmm150::ReadMulti(uint8_t reg, uint8_t* data, uint8_t len) {
 }
 
 bool Bmm150::Init() {
-    // 创建 I2C 设备
+    // 创建 I2C 设备（先用 100kHz 低速确保兼容）
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = addr_,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = 100000,
     };
     esp_err_t err = i2c_master_bus_add_device(bus_, &dev_cfg, &dev_);
     if (err != ESP_OK) {
@@ -58,17 +58,33 @@ bool Bmm150::Init() {
         return false;
     }
 
-    // 验证 Chip ID
-    uint8_t id = ReadReg(REG_CHIP_ID);
+    // 上电后等待芯片稳定
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // 软复位 BMM150（写 POWER_CTRL bit7=1, bit1=1, bit0=1）
+    // 这可以恢复因供电时序异常导致的状态机卡死
+    uint8_t reset_cmd[2] = {REG_POWER_CTRL, 0x83};
+    i2c_master_transmit(dev_, reset_cmd, 2, 100);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 上电序列：POWER_CTRL = 0x01（退出 suspend 模式）
+    uint8_t power_cmd[2] = {REG_POWER_CTRL, 0x01};
+    i2c_master_transmit(dev_, power_cmd, 2, 100);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 验证 Chip ID（重试最多 3 次）
+    uint8_t id = 0;
+    for (int retry = 0; retry < 3; retry++) {
+        id = ReadReg(REG_CHIP_ID);
+        if (id == CHIP_ID_EXPECT) break;
+        ESP_LOGW(TAG, "Chip ID retry %d: 0x%02X", retry, id);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (id != CHIP_ID_EXPECT) {
         ESP_LOGE(TAG, "Bad chip ID: 0x%02X (expected 0x%02X)", id, CHIP_ID_EXPECT);
         return false;
     }
-    ESP_LOGI(TAG, "Chip ID OK");
-
-    // 上电
-    WriteReg(REG_POWER_CTRL, 0x01);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_LOGI(TAG, "Chip ID OK (0x%02X)", id);
 
     // 读取修正常数
     if (!ReadTrim()) {
@@ -81,7 +97,7 @@ bool Bmm150::Init() {
     WriteReg(REG_REP_XY, 0x04);      // 9 repetitions XY
     WriteReg(REG_REP_Z,  0x10);      // 16 repetitions Z
 
-    ESP_LOGI(TAG, "Init OK");
+    ESP_LOGI(TAG, "Init OK (addr=0x%02X)", addr_);
     return true;
 }
 
@@ -115,9 +131,14 @@ bool Bmm150::ReadRaw(int16_t& x, int16_t& y, int16_t& z) {
     y = ((int16_t)((data[3] << 8) | data[2])) >> 3;
     z = ((int16_t)((data[5] << 8) | data[4])) >> 3;
 
-    // 检查 hall 电阻状态
-    uint8_t hall = data[6] >> 6;
-    if (hall != 1) return false;  // 数据不稳定
+    // RHALL 电阻值（用于判断数据有效性）
+    uint16_t rhall = ((uint16_t)data[7] << 6) | (data[6] >> 2);
+    if (rhall == 0) return false;
+
+    static int dbg = 0;
+    if (++dbg <= 5)
+        ESP_LOGI(TAG, "Raw: x=%d y=%d z=%d rhall=%u", x, y, z, rhall);
+
     return true;
 }
 
@@ -151,6 +172,11 @@ float Bmm150::GetHeading() {
     // 方位角: 0=N, 90=E, 180=S, 270=W
     float heading = atan2f(cy, cx) * 180.0f / M_PI;
     if (heading < 0) heading += 360.0f;
+
+    static int dbg2 = 0;
+    if (++dbg2 <= 5)
+        ESP_LOGI(TAG, "Heading: raw=(%d,%d,%d) comp=(%.1f,%.1f) → %.1f°",
+                 rx, ry, rz, cx, cy, heading);
 
     return heading;
 }

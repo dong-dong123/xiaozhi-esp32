@@ -194,6 +194,8 @@ private:
     Bmm150* bmm150_;
     Qmi8658* qmi8658_;
     int step_count_;
+    std::string weather_desc_;    // 天气描述（LVGL上下文消费）
+    int weather_temp_;
 
     // ---- 电源初始化 ----
     void InitializePower() {
@@ -428,24 +430,53 @@ private:
             auto* self = static_cast<CustomWatchS3Board*>(arg);
             vTaskDelay(pdMS_TO_TICKS(1000));
 
-            // BMM150 罗盘（I2C 地址 0x13）
+            // === I2C 总线扫描（调试用：探测 0x08~0x77 所有地址） ===
+            ESP_LOGI(TAG, "=== I2C Scan start ===");
+            for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+                i2c_device_config_t probe_cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = addr,
+                    .scl_speed_hz = 100000,
+                };
+                i2c_master_dev_handle_t probe_dev = nullptr;
+                esp_err_t err = i2c_master_bus_add_device(self->touch_i2c_bus_, &probe_cfg, &probe_dev);
+                if (err == ESP_OK && probe_dev) {
+                    uint8_t reg = 0x00;
+                    uint8_t val = 0;
+                    err = i2c_master_transmit_receive(probe_dev, &reg, 1, &val, 1, 100);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "I2C Scan: device at 0x%02X (reg0=0x%02X)", addr, val);
+                    }
+                    i2c_master_bus_rm_device(probe_dev);
+                }
+            }
+            ESP_LOGI(TAG, "=== I2C Scan done ===");
+
+            // BMM150 罗盘（先尝试地址 0x13，再尝试 0x10）
             {
-                auto* bmm = new Bmm150(self->touch_i2c_bus_, 0x13);
-                if (bmm->Init()) {
-                    self->bmm150_ = bmm;
-                    ESP_LOGI(TAG, "BMM150 OK");
-                    // 指南针定时器 (200ms 更新)
-                    auto* ct = lv_timer_create([](lv_timer_t* t) {
-                        auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
-                        if (b->watch_face_ && b->bmm150_) {
-                            float h = b->bmm150_->GetHeading();
-                            if (h >= 0) b->watch_face_->UpdateCompass(h);
-                        }
-                    }, 200, self);
-                    lv_timer_set_repeat_count(ct, -1);
-                } else {
-                    ESP_LOGW(TAG, "BMM150 not found");
-                    delete bmm;
+                static const uint8_t bmm_candidates[] = {0x13, 0x10, 0x11, 0x12};
+                for (uint8_t addr : bmm_candidates) {
+                    auto* bmm = new Bmm150(self->touch_i2c_bus_, addr);
+                    if (bmm->Init()) {
+                        self->bmm150_ = bmm;
+                        ESP_LOGI(TAG, "BMM150 OK (addr=0x%02X)", addr);
+                        // 指南针定时器 (200ms 更新)
+                        auto* ct = lv_timer_create([](lv_timer_t* t) {
+                            auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
+                            if (b->watch_face_ && b->bmm150_) {
+                                float h = b->bmm150_->GetHeading();
+                                if (h >= 0) b->watch_face_->UpdateCompass(h);
+                            }
+                        }, 200, self);
+                        lv_timer_set_repeat_count(ct, -1);
+                        break;  // 找到即停止
+                    } else {
+                        ESP_LOGW(TAG, "BMM150 not found at 0x%02X", addr);
+                        delete bmm;
+                    }
+                }
+                if (!self->bmm150_) {
+                    ESP_LOGW(TAG, "BMM150 not found at any address");
                 }
             }
 
@@ -482,8 +513,16 @@ private:
     }
 
 public:
+    // 天气数据存储 + lv_async_call 触发 LVGL 上下文安全更新
+    static void WeatherUICB(void* user) {
+        auto* self = static_cast<CustomWatchS3Board*>(user);
+        if (self->watch_face_)
+            self->watch_face_->UpdateWeather(self->weather_desc_.c_str(), self->weather_temp_);
+    }
     void OnWeatherUpdate(const char* desc, int temp_c) {
-        if (watch_face_) watch_face_->UpdateWeather(desc, temp_c);
+        weather_desc_ = desc ? desc : "";
+        weather_temp_ = temp_c;
+        lv_async_call(WeatherUICB, this);
     }
 
     // IMU 回调（在 IMU 任务中调用，只存储步数，由 LVGL 定时器刷新显示）
@@ -507,7 +546,7 @@ public:
                            volume_up_button_(GPIO_NUM_NC),       // FIXME: 暂时禁用，等按键焊接后再启用
                            volume_down_button_(GPIO_NUM_NC),     // FIXME: 暂时禁用，等按键焊接后再启用
                            watch_face_(nullptr),
-                           bmm150_(nullptr), qmi8658_(nullptr), step_count_(0) {
+                           bmm150_(nullptr), qmi8658_(nullptr), step_count_(0), weather_temp_(0) {
         s_panel_mutex = xSemaphoreCreateBinary();
         xSemaphoreGive(s_panel_mutex);
         ESP_LOGI(TAG, "=== Board init start ===");
@@ -676,9 +715,7 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
                     if (temp && desc) {
                         int temp_c = atoi(temp->valuestring);
                         ESP_LOGI(TAG, "天气: %s %d°C (raw=%s)", desc, temp_c, temp->valuestring);
-                        Application::GetInstance().Schedule([board, temp_c, desc = std::string(desc)]() {
-                            board->OnWeatherUpdate(desc.c_str(), temp_c);
-                        });
+                        board->OnWeatherUpdate(desc, temp_c);
                     }
                 }
                 cJSON_Delete(root);

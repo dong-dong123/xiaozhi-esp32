@@ -328,17 +328,34 @@ void WatchFace::CreateCompassPage() {
     lv_label_set_text(compass_lbl_w_, "W");
     lv_obj_align(compass_lbl_w_, LV_ALIGN_CENTER, -108, -40);
 
-    // 北向主指针 (三角箭头)
-    compass_pointer_ = lv_line_create(p);
-    lv_obj_set_style_line_color(compass_pointer_, C_ORANGE, 0);
-    lv_obj_set_style_line_width(compass_pointer_, 3, 0);
-    lv_obj_set_style_line_rounded(compass_pointer_, true, 0);
+    // === 北向杆 (白色, 8×75, pivot在底端圆心) ===
+    {
+        compass_pointer_ = lv_obj_create(p);
+        lv_obj_remove_style_all(compass_pointer_);
+        lv_obj_set_size(compass_pointer_, 8, 75);
+        lv_obj_set_pos(compass_pointer_, cx - 4, cy - 75);
+        lv_obj_set_style_bg_color(compass_pointer_, C_WHITE, 0);
+        lv_obj_set_style_bg_opa(compass_pointer_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(compass_pointer_, 4, 0);
+        lv_obj_set_style_border_width(compass_pointer_, 0, 0);
+        lv_obj_set_style_transform_pivot_x(compass_pointer_, lv_pct(50), 0);
+        lv_obj_set_style_transform_pivot_y(compass_pointer_, lv_pct(100), 0);
+    }
 
-    // 南向副指针
-    compass_pointer_south_ = lv_line_create(p);
-    lv_obj_set_style_line_color(compass_pointer_south_, lv_color_hex(0x666666), 0);
-    lv_obj_set_style_line_width(compass_pointer_south_, 2, 0);
-    lv_obj_set_style_line_rounded(compass_pointer_south_, true, 0);
+    // === 南向杆 (橙色, 8×75, pivot在底端圆心) ===
+    {
+        compass_pointer_south_ = lv_obj_create(p);
+        lv_obj_remove_style_all(compass_pointer_south_);
+        lv_obj_set_size(compass_pointer_south_, 8, 75);
+        lv_obj_set_pos(compass_pointer_south_, cx - 4, cy - 75);
+        lv_obj_set_style_bg_color(compass_pointer_south_, C_ORANGE, 0);
+        lv_obj_set_style_bg_opa(compass_pointer_south_, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(compass_pointer_south_, 4, 0);
+        lv_obj_set_style_border_width(compass_pointer_south_, 0, 0);
+        lv_obj_set_style_transform_pivot_x(compass_pointer_south_, lv_pct(50), 0);
+        lv_obj_set_style_transform_pivot_y(compass_pointer_south_, lv_pct(100), 0);
+        lv_obj_set_style_transform_rotation(compass_pointer_south_, 1800, 0);
+    }
 
     // 中心点
     compass_dot_ = lv_obj_create(p);
@@ -517,36 +534,10 @@ void WatchFace::UpdateCompass(float heading_deg) {
 }
 
 void WatchFace::UpdateCompassPointer() {
-    float rad = (compass_heading_ - 90.0f) * M_PI / 180.0f;
-    float cos_a = cosf(rad), sin_a = sinf(rad);
-    int cx = 205, cy = 210;
-    int len = 78;
+    int32_t h = (int32_t)(compass_heading_ * 10);
+    lv_obj_set_style_transform_rotation(compass_pointer_, h, 0);
+    lv_obj_set_style_transform_rotation(compass_pointer_south_, h + 1800, 0);
 
-    // 北向主指针 (三角形箭头)
-    {
-        float rad_r = rad + M_PI / 2.0f;
-        float cos_r = cosf(rad_r), sin_r = sinf(rad_r);
-        lv_point_precise_t pts[3];
-        pts[0].x = cx + (int)(len * cos_a);
-        pts[0].y = cy + (int)(len * sin_a);
-        pts[1].x = cx + (int)(8 * cos_r);
-        pts[1].y = cy + (int)(8 * sin_r);
-        pts[2].x = cx - (int)(8 * cos_r);
-        pts[2].y = cy - (int)(8 * sin_r);
-        lv_line_set_points(compass_pointer_, pts, 3);
-    }
-
-    // 南向副指针
-    {
-        lv_point_precise_t pts[2];
-        pts[0].x = cx;
-        pts[0].y = cy;
-        pts[1].x = cx - (int)((len - 20) * cos_a);
-        pts[1].y = cy - (int)((len - 20) * sin_a);
-        lv_line_set_points(compass_pointer_south_, pts, 2);
-    }
-
-    // 方位角文字
     const char* dirs[] = {"北","东北","东","东南","南","西南","西","西北"};
     int idx = ((int)(compass_heading_ + 22.5f) / 45) % 8;
     char buf[32];
