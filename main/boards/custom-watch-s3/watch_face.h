@@ -10,7 +10,8 @@ public:
 
     void Show();
     void Hide();
-    lv_obj_t* GetTapArea()  { return tap_area_; }
+    lv_obj_t* GetTapArea()      { return tap_area_[0]; }
+    lv_obj_t* GetTapArea(int p) { return (p >= 0 && p < 3) ? tap_area_[p] : tap_area_[0]; }
 
     void UpdateClock();
     void UpdateWeather(const char* desc, int temp_c);
@@ -18,39 +19,60 @@ public:
     void UpdateCompass(float heading_deg);
 
 private:
-    lv_obj_t* container_;
-    lv_obj_t* clock_label_;
-    lv_obj_t* date_label_;
-    lv_obj_t* weather_icon_;
-    lv_obj_t* weather_label_;
-    lv_obj_t* steps_label_;
-    lv_obj_t* tap_area_;
-    lv_obj_t* tap_hint_;
+    lv_obj_t* container_;           // 根容器 410x502
+    lv_obj_t* scroll_container_;    // 滚动视口，内容宽 1230px
+    lv_obj_t* page_[3];             // 三个页面容器
+    lv_obj_t* page_dot_[3];         // 页面指示器圆点
+    int current_page_;
 
-    // 指南针 — 纯 LVGL 对象
-    lv_obj_t* compass_cont_;
-    lv_obj_t* compass_ring_;
-    lv_obj_t* compass_dot_;
-    lv_obj_t* compass_pointer_;
-    lv_point_precise_t compass_points_[2];
-    lv_obj_t* compass_lbl_n_;
-    lv_obj_t* compass_lbl_s_;
-    lv_obj_t* compass_lbl_e_;
-    lv_obj_t* compass_lbl_w_;
-
-    // 状态栏
+    // 状态栏 (overlay)
+    lv_obj_t* status_bar_bg_;
     lv_obj_t* wifi_label_;
     lv_obj_t* battery_icon_;
     lv_obj_t* battery_label_;
 
-    lv_timer_t* clock_timer_;
-    lv_timer_t* status_timer_;
+    // Page 0: 主页
+    lv_obj_t* clock_label_;
+    lv_obj_t* date_label_;
+    lv_obj_t* weather_icon_;
+    lv_obj_t* weather_label_;
+
+    // Page 1: 步数
+    lv_obj_t* steps_arc_;
+    lv_obj_t* steps_count_label_;
+    lv_obj_t* steps_target_label_;
+
+    // Page 2: 指南针
+    lv_obj_t* compass_ring_outer_;
+    lv_obj_t* compass_ring_inner_;
+    lv_obj_t* compass_tick_[16];
+    lv_point_precise_t compass_tick_pts_[16][2];
+    lv_obj_t* compass_pointer_;       // 北向主针 (lv_line, 3点三角)
+    lv_obj_t* compass_pointer_south_; // 南向副针 (lv_line, 2点)
+    lv_obj_t* compass_dot_;           // 中心点
+    lv_obj_t* compass_lbl_n_, *compass_lbl_s_, *compass_lbl_e_, *compass_lbl_w_;
+    lv_obj_t* compass_heading_label_;
     float compass_heading_;
 
-    void CreateCompass(int cx, int cy, int radius);
-    void UpdateCompassPointer();
+    // 底部按钮 (每页各一个)
+    lv_obj_t* tap_area_[3];
+    lv_obj_t* tap_hint_[3];
+
+    // 定时器
+    lv_timer_t* clock_timer_;
+    lv_timer_t* status_timer_;
+
+    // 私有方法
+    void CreateScrollLayout();
+    void CreatePageIndicator();
+    void CreateHomePage();
+    void CreateStepsPage();
+    void CreateCompassPage();
     void CreateStatusBar();
     void UpdateStatusBar();
+    void UpdateCompassPointer();
+    void UpdatePageIndicator();
+    static void ScrollEventCB(lv_event_t* e);
     static void ClockTimerCB(lv_timer_t* timer);
     static void StatusTimerCB(lv_timer_t* timer);
     static const char* WeatherIcon(const char* desc);

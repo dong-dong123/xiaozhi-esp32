@@ -434,6 +434,15 @@ private:
                 if (bmm->Init()) {
                     self->bmm150_ = bmm;
                     ESP_LOGI(TAG, "BMM150 OK");
+                    // 指南针定时器 (200ms 更新)
+                    auto* ct = lv_timer_create([](lv_timer_t* t) {
+                        auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(t));
+                        if (b->watch_face_ && b->bmm150_) {
+                            float h = b->bmm150_->GetHeading();
+                            if (h >= 0) b->watch_face_->UpdateCompass(h);
+                        }
+                    }, 200, self);
+                    lv_timer_set_repeat_count(ct, -1);
                 } else {
                     ESP_LOGW(TAG, "BMM150 not found");
                     delete bmm;
@@ -558,11 +567,13 @@ public:
                 lv_timer_set_repeat_count(t_step, -1);  // 无限重复，每2秒刷新
             }
 
-            // 触摸唤醒
-            lv_obj_add_event_cb(self->watch_face_->GetTapArea(), [](lv_event_t* e) {
-                if (lv_event_get_code(e) == LV_EVENT_CLICKED)
-                    Application::GetInstance().ToggleChatState();
-            }, LV_EVENT_CLICKED, nullptr);
+            // 触摸唤醒 (三个页面底部按钮)
+            for (int pg = 0; pg < 3; pg++) {
+                lv_obj_add_event_cb(self->watch_face_->GetTapArea(pg), [](lv_event_t* e) {
+                    if (lv_event_get_code(e) == LV_EVENT_CLICKED)
+                        Application::GetInstance().ToggleChatState();
+                }, LV_EVENT_CLICKED, nullptr);
+            }
 
             // 状态轮询：idle 显示手表，聊天时隐藏 + 眨眼动画
             static lv_timer_t* blink_timer = nullptr;
@@ -641,7 +652,7 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
         cfg.url = WEATHER_URL;
         cfg.event_handler = _weather_event_handler;
         cfg.user_data = &body;
-        cfg.timeout_ms = 30000;
+        cfg.timeout_ms = 60000;
         cfg.skip_cert_common_name_check = true;
 
         esp_http_client_handle_t client = esp_http_client_init(&cfg);

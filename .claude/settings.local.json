@@ -27,7 +27,9 @@
       "Bash(ls -la \"D:\\\\Download\\\\QMI8658资料\\\\QMI8658资料\\\\\")",
       "Read(//d/Download/QMI8658资料/**)",
       "Bash(mkdir -p \"/c/Users/Admin/Desktop/co5300_test/main\" \"/c/Users/Admin/Desktop/co5300_test/components/esp_lcd_co5300/include\")",
-      "Bash(idf.py build *)"
+      "Bash(idf.py build *)",
+      "Bash(C:/Espressif/frameworks/esp-idf-v5.5.4/idf.py build *)",
+      "Bash(cmd.exe //c \"C:\\\\Espressif\\\\frameworks\\\\esp-idf-v5.5.4\\\\idf.py build 2>&1\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Admin\\Desktop\\co5300_test"
