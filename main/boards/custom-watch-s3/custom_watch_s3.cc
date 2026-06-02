@@ -504,10 +504,10 @@ private:
     }
 
     void StartWeatherTimer() {
-        // 15秒后首次获取，之后每30分钟
-        lv_timer_t* t = lv_timer_create([](lv_timer_t* timer) {
+        // 15秒后首次获取，之后每30分钟自动刷新
+        auto* t = lv_timer_create([](lv_timer_t* timer) {
             StartWeatherFetch(static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(timer)));
-            lv_timer_set_period(timer, 1800000);  // 成功后改为30分钟
+            lv_timer_set_period(timer, 1800000);
         }, 15000, this);
         lv_timer_set_repeat_count(t, -1);
     }
@@ -686,42 +686,44 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
         auto* board = static_cast<CustomWatchS3Board*>(arg);
         ESP_LOGI(TAG, "天气任务启动");
 
-        std::string body;
-        esp_http_client_config_t cfg = {};
-        cfg.url = WEATHER_URL;
-        cfg.event_handler = _weather_event_handler;
-        cfg.user_data = &body;
-        cfg.timeout_ms = 60000;
-        cfg.skip_cert_common_name_check = true;
+        while (true) {
+            std::string body;
+            esp_http_client_config_t cfg = {};
+            cfg.url = WEATHER_URL;
+            cfg.event_handler = _weather_event_handler;
+            cfg.user_data = &body;
+            cfg.timeout_ms = 20000;  // 20s 超时（原60s太长）
+            cfg.skip_cert_common_name_check = true;
 
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        esp_err_t err = esp_http_client_perform(client);
-        int status = esp_http_client_get_status_code(client);
-        esp_http_client_cleanup(client);
+            esp_http_client_handle_t client = esp_http_client_init(&cfg);
+            esp_err_t err = esp_http_client_perform(client);
+            int status = esp_http_client_get_status_code(client);
+            esp_http_client_cleanup(client);
 
-        ESP_LOGI(TAG, "天气: HTTP状态=%d 错误=%d 数据=%d字节", status, err, body.size());
+            ESP_LOGI(TAG, "天气: HTTP状态=%d 错误=%d 数据=%d字节", status, err, body.size());
 
-        if (err == ESP_OK && status == 200 && !body.empty()) {
-            cJSON* root = cJSON_Parse(body.c_str());
-            if (root) {
-                cJSON* current = cJSON_GetObjectItem(root, "current_condition");
-                if (current && cJSON_GetArraySize(current) > 0) {
-                    cJSON* cond = cJSON_GetArrayItem(current, 0);
-                    cJSON* temp = cJSON_GetObjectItem(cond, "temp_C");
-                    cJSON* desc_arr = cJSON_GetObjectItem(cond, "weatherDesc");
-                    const char* desc = "";
-                    if (desc_arr && cJSON_GetArraySize(desc_arr) > 0)
-                        desc = cJSON_GetObjectItem(cJSON_GetArrayItem(desc_arr, 0), "value")->valuestring;
-                    if (temp && desc) {
-                        int temp_c = atoi(temp->valuestring);
-                        ESP_LOGI(TAG, "天气: %s %d°C (raw=%s)", desc, temp_c, temp->valuestring);
-                        board->OnWeatherUpdate(desc, temp_c);
+            if (err == ESP_OK && status == 200 && !body.empty()) {
+                cJSON* root = cJSON_Parse(body.c_str());
+                if (root) {
+                    cJSON* current = cJSON_GetObjectItem(root, "current_condition");
+                    if (current && cJSON_GetArraySize(current) > 0) {
+                        cJSON* cond = cJSON_GetArrayItem(current, 0);
+                        cJSON* temp = cJSON_GetObjectItem(cond, "temp_C");
+                        cJSON* desc_arr = cJSON_GetObjectItem(cond, "weatherDesc");
+                        const char* desc = "";
+                        if (desc_arr && cJSON_GetArraySize(desc_arr) > 0)
+                            desc = cJSON_GetObjectItem(cJSON_GetArrayItem(desc_arr, 0), "value")->valuestring;
+                        if (temp && desc) {
+                            int temp_c = atoi(temp->valuestring);
+                            ESP_LOGI(TAG, "天气: %s %d°C", desc, temp_c);
+                            board->OnWeatherUpdate(desc, temp_c);
+                        }
                     }
+                    cJSON_Delete(root);
                 }
-                cJSON_Delete(root);
+                break; // 成功退出
             }
-        } else {
-            ESP_LOGW(TAG, "天气获取失败，15秒后重试");
+            ESP_LOGW(TAG, "天气获取失败，立即重试");
         }
         vTaskDelete(nullptr);
     }, "weather", 8192, board, 1, nullptr);
