@@ -719,10 +719,6 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
 
     if (wake_word_) {
         wake_word_->OnWakeWordDetected([this](const std::string& wake_word) {
-            // 读取用户选择的唤醒词，仅匹配的才触发
-            Settings s("audio", false);
-            std::string selected = s.GetString("wake_word", "");
-            if (!selected.empty() && wake_word != selected) return;
             if (callbacks_.on_wake_word_detected) {
                 callbacks_.on_wake_word_detected(wake_word);
             }
