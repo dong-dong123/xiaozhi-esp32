@@ -17,10 +17,11 @@ public:
     void UpdateWeather(const char* desc, int temp_c);
     void UpdateSteps(int steps);
     void UpdateCompass(float heading_deg);
+    void ShowVolumeToast(int vol);
 
 private:
     lv_obj_t* container_;           // 根容器 410x502
-    lv_obj_t* scroll_container_;    // 滚动视口，内容宽 1230px
+    lv_obj_t* scroll_container_;    // 滚动视口
     lv_obj_t* page_[3];             // 三个页面容器
     lv_obj_t* page_dot_[3];         // 页面指示器圆点
     int current_page_;
@@ -62,6 +63,19 @@ private:
     lv_timer_t* clock_timer_;
     lv_timer_t* status_timer_;
 
+    // 设置面板
+    lv_obj_t* settings_cog_;          // 状态栏齿轮图标
+    lv_obj_t* settings_overlay_;      // 半透明遮罩
+    lv_obj_t* settings_panel_;        // 居中卡片
+    lv_obj_t* settings_slider_;       // 音量滑动条
+    lv_obj_t* settings_vol_label_;    // 音量数值
+    lv_obj_t* settings_theme_dark_;   // 暗色按钮
+    lv_obj_t* settings_theme_light_;  // 亮色按钮
+    lv_obj_t* settings_wake_dd_;      // 唤醒词下拉框
+    lv_obj_t* settings_model_label_;  // 模型信息展示
+    lv_obj_t* settings_save_btn_;     // 保存并重启按钮
+    int settings_volume_;
+
     // 私有方法
     void CreateScrollLayout();
     void CreatePageIndicator();
@@ -69,12 +83,18 @@ private:
     void CreateStepsPage();
     void CreateCompassPage();
     void CreateStatusBar();
+    void CreateSettingsPanel();
     void UpdateStatusBar();
     void UpdateCompassPointer();
     void UpdatePageIndicator();
+    void RefreshThemeButtons();
+    void ApplyTheme(bool dark);
+    void ShowSettings();
+    void HideSettings();
     static void ScrollEventCB(lv_event_t* e);
     static void ClockTimerCB(lv_timer_t* timer);
     static void StatusTimerCB(lv_timer_t* timer);
+    static void SettingsSliderCB(lv_event_t* e);
     static const char* WeatherIcon(const char* desc);
 };
 

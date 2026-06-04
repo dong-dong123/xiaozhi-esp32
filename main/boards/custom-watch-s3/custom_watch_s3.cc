@@ -406,21 +406,55 @@ private:
             }
             app.ToggleChatState();
         });
+        // 长按 BOOT 键 3 秒重启
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGW(TAG, "BOOT 长按 → 重启");
+            auto& app = Application::GetInstance();
+            app.Schedule([&app]() { vTaskDelay(pdMS_TO_TICKS(500)); app.Reboot(); });
+        });
 
-        // 音量+ (TODO: 实现音量调节逻辑)
+        // 音量+ (单击+5, 长按+10)
         volume_up_button_.OnClick([this]() {
-            (void)Application::GetInstance();
+            auto* codec = GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume() + 5;
+                if (vol > 100) vol = 100;
+                codec->SetOutputVolume(vol);
+                if (watch_face_) watch_face_->ShowVolumeToast(vol);
+                ESP_LOGI(TAG, "Volume: %d%%", vol);
+            }
         });
         volume_up_button_.OnLongPress([this]() {
-            (void)Application::GetInstance();
+            auto* codec = GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume() + 10;
+                if (vol > 100) vol = 100;
+                codec->SetOutputVolume(vol);
+                if (watch_face_) watch_face_->ShowVolumeToast(vol);
+                ESP_LOGI(TAG, "Volume: %d%%", vol);
+            }
         });
 
-        // 音量- (TODO: 实现音量调节逻辑)
+        // 音量- (单击-5, 长按-10)
         volume_down_button_.OnClick([this]() {
-            (void)Application::GetInstance();
+            auto* codec = GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume() - 5;
+                if (vol < 0) vol = 0;
+                codec->SetOutputVolume(vol);
+                if (watch_face_) watch_face_->ShowVolumeToast(vol);
+                ESP_LOGI(TAG, "Volume: %d%%", vol);
+            }
         });
         volume_down_button_.OnLongPress([this]() {
-            (void)Application::GetInstance();
+            auto* codec = GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume() - 10;
+                if (vol < 0) vol = 0;
+                codec->SetOutputVolume(vol);
+                if (watch_face_) watch_face_->ShowVolumeToast(vol);
+                ESP_LOGI(TAG, "Volume: %d%%", vol);
+            }
         });
     }
 
@@ -543,8 +577,8 @@ public:
     }
 
     CustomWatchS3Board() : boot_button_(BOOT_BUTTON_GPIO),
-                           volume_up_button_(GPIO_NUM_NC),       // FIXME: 暂时禁用，等按键焊接后再启用
-                           volume_down_button_(GPIO_NUM_NC),     // FIXME: 暂时禁用，等按键焊接后再启用
+                           volume_up_button_(VOLUME_UP_BUTTON_GPIO),
+                           volume_down_button_(VOLUME_DOWN_BUTTON_GPIO),
                            watch_face_(nullptr),
                            bmm150_(nullptr), qmi8658_(nullptr), step_count_(0), weather_temp_(0) {
         s_panel_mutex = xSemaphoreCreateBinary();

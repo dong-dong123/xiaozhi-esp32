@@ -193,9 +193,9 @@ void imu_task(void* arg) {
         }
         if (acc_mag < 11.0f) step_high = false;
 
-        // ---- 摇一摇唤醒（检测完整来回：11g→10g→11g 为一个周期，1s内≥4次） ----
+        // ---- 摇一摇唤醒（13g→10g→13g 为一个周期，1s内≥5次，5s冷却） ----
         {
-            if (acc_mag > 11.0f && !shake_high) {
+            if (acc_mag > 13.0f && !shake_high) {
                 shake_high = true;
                 if (shake_had_drop) {
                     shake_had_drop = false;
@@ -208,7 +208,7 @@ void imu_task(void* arg) {
                             count++;
                         }
                     }
-                    if (count >= 4 && ctx->on_shake &&
+                    if (count >= 5 && ctx->on_shake &&
                         (int32_t)(data.timestamp_ms - shake_cooldown) > 5000) {
                         ctx->on_shake(ctx->user_data);
                         shake_cooldown = data.timestamp_ms;
