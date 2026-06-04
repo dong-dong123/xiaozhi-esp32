@@ -586,6 +586,8 @@ void WatchFace::CreateSettingsPanel() {
     lv_label_set_text(lbl_wake, "唤醒词");
     lv_obj_align(lbl_wake, LV_ALIGN_TOP_LEFT, 15, y);
 
+    y += 8;
+
     const char* wake_words[] = {"你好小智", "你好 大兄弟", "你好 姐妹", "嘿小智", "小智小智"};
     Settings ws("audio", false);
     std::string cur_wake = ws.GetString("wake_word", "你好小智");
@@ -657,18 +659,19 @@ void WatchFace::CreateSettingsPanel() {
     lv_obj_set_style_text_color(settings_model_label_, C_GRAY, 0);
     lv_label_set_text(settings_model_label_, "云端默认 (可从小智后台切换)");
     lv_obj_align(settings_model_label_, LV_ALIGN_TOP_LEFT, 120, y + 2);
-    y += 46;
+    y += 28;
 
-    // ---- 提示文字 + 关闭按钮 ----
-    lv_obj_t* hint = lv_label_create(settings_panel_);
-    lv_obj_set_style_text_font(hint, &font_puhui_16_4, 0);
-    lv_obj_set_style_text_color(hint, C_GRAY, 0);
-    lv_label_set_text(hint, "主题/音量立即生效，唤醒词重启后生效");
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -48);
+    // 唤醒词提示（放语音模型下面）
+    lv_obj_t* hint_wake = lv_label_create(settings_panel_);
+    lv_obj_set_style_text_font(hint_wake, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(hint_wake, lv_color_hex(0xCC3333), 0);
+    lv_label_set_text(hint_wake, "唤醒词需后台同步修改后生效");
+    lv_obj_align(hint_wake, LV_ALIGN_TOP_LEFT, 15, y);
 
+    // ---- 底部：关闭(大) + 重启(小) ----
     settings_save_btn_ = lv_btn_create(settings_panel_);
-    lv_obj_set_size(settings_save_btn_, 160, 36);
-    lv_obj_align(settings_save_btn_, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_size(settings_save_btn_, 200, 42);
+    lv_obj_align(settings_save_btn_, LV_ALIGN_BOTTOM_MID, 0, -14);
     lv_obj_set_style_radius(settings_save_btn_, 10, 0);
     lv_obj_set_style_bg_color(settings_save_btn_, C_ORANGE, 0);
     lv_obj_t* lbl_save = lv_label_create(settings_save_btn_);
@@ -680,10 +683,10 @@ void WatchFace::CreateSettingsPanel() {
         self->HideSettings();
     }, LV_EVENT_CLICKED, this);
 
-    // 重启按钮
+    // 重启按钮(小，放上面)
     lv_obj_t* reboot_btn = lv_btn_create(settings_panel_);
-    lv_obj_set_size(reboot_btn, 160, 36);
-    lv_obj_align(reboot_btn, LV_ALIGN_BOTTOM_MID, 0, -56);
+    lv_obj_set_size(reboot_btn, 110, 30);
+    lv_obj_align(reboot_btn, LV_ALIGN_BOTTOM_MID, 0, -66);
     lv_obj_set_style_radius(reboot_btn, 10, 0);
     lv_obj_set_style_bg_color(reboot_btn, lv_color_hex(0xCC3333), 0);
     lv_obj_t* lbl_reboot = lv_label_create(reboot_btn);
