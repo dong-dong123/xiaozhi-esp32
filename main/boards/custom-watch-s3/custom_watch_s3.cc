@@ -175,11 +175,17 @@ public:
     WatchBacklight(esp_lcd_panel_io_handle_t io) : Backlight(), panel_io_(io) {}
 protected:
     virtual void SetBrightnessImpl(uint8_t brightness) override {
-        // 亮度在 init 中已设置为 0xFF 最大，不在此处重复发送
+        if (s_panel_mutex) xSemaphoreTake(s_panel_mutex, pdMS_TO_TICKS(500));
+        uint8_t b = brightness;
+        uint32_t cmd = (LCD_OPCODE_WRITE_CMD << 24) | (0x51UL << 8);
+        esp_lcd_panel_io_tx_param(panel_io_, cmd, &b, 1);
+        if (s_panel_mutex) xSemaphoreGive(s_panel_mutex);
     }
 };
 
 // ==================== 主板卡类 ====================
+#define SCREEN_TIMEOUT_MS 30000  // 30秒无触摸息屏
+
 class CustomWatchS3Board : public WifiBoard {
 private:
     i2c_master_bus_handle_t touch_i2c_bus_;   // I2C_NUM_0 (触摸+传感器+RTC共用)
@@ -195,6 +201,9 @@ private:
     Qmi8658* qmi8658_;
     int step_count_;
     std::string weather_desc_;    // 天气描述（LVGL上下文消费）
+    esp_timer_handle_t screen_timer_ = nullptr;
+    bool screen_off_ = false;
+    uint8_t saved_brightness_ = 85;
     int weather_temp_;
 
     // ---- 电源初始化 ----
@@ -559,6 +568,33 @@ public:
         lv_async_call(WeatherUICB, this);
     }
 
+    // ---- 息屏/亮屏管理 ----
+    static void ScreenTimerCB(void* arg) {
+        auto* self = static_cast<CustomWatchS3Board*>(arg);
+        if (self->screen_off_) return;
+        self->screen_off_ = true;
+        // 保存当前亮度 → 降到 0（息屏）
+        self->saved_brightness_ = self->backlight_ ? self->backlight_->brightness() : 255;
+        if (self->backlight_) self->backlight_->SetBrightness(0, true);
+        ESP_LOGI(TAG, "Screen off (timeout)");
+    }
+
+    void ResetScreenTimer() {
+        if (screen_timer_) esp_timer_stop(screen_timer_);
+        esp_timer_start_once(screen_timer_, SCREEN_TIMEOUT_MS * 1000);
+        if (screen_off_) {
+            // 恢复亮度（抬腕/触摸唤醒）
+            screen_off_ = false;
+            if (backlight_) backlight_->SetBrightness(saved_brightness_, true);
+            ESP_LOGI(TAG, "Screen on (wake)");
+        }
+    }
+
+    static void OnTouchWake(lv_event_t* e) {
+        auto* self = static_cast<CustomWatchS3Board*>(lv_event_get_user_data(e));
+        self->ResetScreenTimer();
+    }
+
     // IMU 回调（在 IMU 任务中调用，只存储步数，由 LVGL 定时器刷新显示）
     static void OnImuStep(void* user, int steps) {
         auto* self = static_cast<CustomWatchS3Board*>(user);
@@ -567,7 +603,7 @@ public:
     static void OnImuWristUp(void* user) {
         auto* self = static_cast<CustomWatchS3Board*>(user);
         Application::GetInstance().Schedule([self]() {
-            if (self->backlight_) self->backlight_->RestoreBrightness();
+            self->ResetScreenTimer();
         });
     }
     static void OnImuShake(void* user) {
@@ -605,6 +641,31 @@ public:
             if (!parent) { ESP_LOGE(TAG, "No active screen!"); return; }
             self->watch_face_ = new WatchFace(parent);
             ESP_LOGI(TAG, "WatchFace created");
+
+            // 息屏计时器：30 秒无触摸自动降亮度到 0
+            esp_timer_create_args_t screen_timer_args = {
+                .callback = &CustomWatchS3Board::ScreenTimerCB,
+                .arg = self,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "screen_off",
+            };
+            esp_timer_create(&screen_timer_args, &self->screen_timer_);
+            esp_timer_start_once(self->screen_timer_, SCREEN_TIMEOUT_MS * 1000);
+            // 所有触摸事件重置计时器
+            // indev 级别触摸唤醒（不干扰 UI 事件）
+            lv_indev_t* indev = lv_indev_get_next(nullptr);
+            while (indev) {
+                if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+                    lv_indev_add_event_cb(indev, OnTouchWake, LV_EVENT_PRESSED, self);
+                    break;
+                }
+                indev = lv_indev_get_next(indev);
+            }
+            ESP_LOGI(TAG, "Screen timeout: %d s", SCREEN_TIMEOUT_MS / 1000);
+
+            // 设置初始亮度（覆盖 backlight 的默认值 0）
+            self->backlight_->SetBrightness(85, true);
+            self->saved_brightness_ = 85;
 
             // 防 CO5300 APS 休眠：独立FreeRTOS任务，与LVGL通过信号量互斥
             {
@@ -665,6 +726,7 @@ public:
                 }
 
                 if (!show_watch) {
+                    b->ResetScreenTimer();  // 聊天中保持亮屏不息屏
                     b->watch_face_->Hide();
                     // 聊天时启动眨眼动画
                     if (!blink_timer) {
@@ -720,13 +782,21 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
         auto* board = static_cast<CustomWatchS3Board*>(arg);
         ESP_LOGI(TAG, "天气任务启动");
 
-        while (true) {
+        int retry = 0;
+        while (retry < 10) {
+            if (retry > 0) {
+                int delay = (retry <= 3) ? 5000 : 30000;
+                ESP_LOGI(TAG, "天气重试 #%d/%d (%ds后)", retry, 10, delay / 1000);
+                vTaskDelay(pdMS_TO_TICKS(delay));
+            }
+            retry++;
+
             std::string body;
             esp_http_client_config_t cfg = {};
             cfg.url = WEATHER_URL;
             cfg.event_handler = _weather_event_handler;
             cfg.user_data = &body;
-            cfg.timeout_ms = 20000;  // 20s 超时（原60s太长）
+            cfg.timeout_ms = 15000;
             cfg.skip_cert_common_name_check = true;
 
             esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -757,7 +827,10 @@ static void StartWeatherFetch(CustomWatchS3Board* board) {
                 }
                 break; // 成功退出
             }
-            ESP_LOGW(TAG, "天气获取失败，立即重试");
+            ESP_LOGW(TAG, "天气获取失败");
+        }
+        if (retry >= 10) {
+            ESP_LOGW(TAG, "天气: %d 次重试均失败，等待下次定时触发", 10);
         }
         vTaskDelete(nullptr);
     }, "weather", 8192, board, 1, nullptr);
