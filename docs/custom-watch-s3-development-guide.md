@@ -1,7 +1,7 @@
 # Custom Watch S3 二次开发技术总结
 
 > 作者: dong-dong123  
-> 日期: 2026-06-02 ~ 2026-06-05  
+> 日期: 2026-06-02 ~ 2026-06-06  
 > 基础项目: xiaozhi-esp32 (小智语音助手)  
 > 硬件: ESP32-S3 + CO5300 AMOLED 410×502 + BMM150 + QMI8658 + NS4168 + MS4030
 
@@ -16,8 +16,10 @@
 3. **传感器驱动修复与算法优化** — BMM150 内存下溢修复、QMI8658 计步/摇一摇算法
 4. **三页滑动手表界面** — 主页、步数、指南针
 5. **设置面板** — 主题切换、音量调节、唤醒词选择
-6. **天气获取** — HTTP 客户端 + 超时重试
+6. **天气获取** — HTTP 客户端 + 超时重试 + 限次重试
 7. **分区表改造** — 扩大 assets 分区支持在线资源烧录
+8. **息屏与唤醒** — 30 秒无触摸息屏 + 抬腕/触摸亮屏 + 聊天不息屏
+9. **WiFi 配网优化** — 连接超时从 60s 缩短到 20s
 
 ---
 
@@ -338,7 +340,104 @@ StartWeatherTimer (lv_timer, 15s延迟)
 
 ---
 
-## 九、分区表
+## 九、息屏与唤醒管理
+
+### 9.1 需求
+
+- **30 秒无触摸自动息屏**：降低 CO5300 亮度到 0
+- **抬腕亮屏**：QMI8658 检测抬腕 → 恢复亮度
+- **触摸亮屏**：任何触摸操作恢复亮度
+- **聊天中不息屏**：语音对话期间保持亮屏
+
+### 9.2 实现架构
+
+```cpp
+// custom_watch_s3.cc — CustomWatchS3Board 类
+
+SCREEN_TIMEOUT_MS = 30000       // 30 秒超时
+esp_timer_handle_t screen_timer_  // 硬件定时器（单次触发）
+bool screen_off_                  // 当前是否已息屏
+uint8_t saved_brightness_ = 85    // 息屏前保存的亮度值
+
+// 计时器回调 — 到时间不重置就息屏
+ScreenTimerCB() {
+    saved_brightness_ = backlight_->brightness();
+    backlight_->SetBrightness(0, true);  // QSPI 命令 0x51=0x00
+    screen_off_ = true;
+}
+
+// 重置计时器 — 触摸/抬腕/聊天时调用
+ResetScreenTimer() {
+    esp_timer_stop(screen_timer_);           // 停掉旧计时
+    esp_timer_start_once(screen_timer_, 30s); // 开始新计时
+    if (screen_off_) {
+        screen_off_ = false;
+        backlight_->SetBrightness(saved_brightness_, true);
+    }
+}
+```
+
+### 9.3 唤醒源
+
+| 唤醒源 | 触发机制 | 实现位置 |
+|--------|----------|----------|
+| 触摸屏幕 | `lv_indev` 指针设备的 `LV_EVENT_PRESSED` | `OnTouchWake` → `ResetScreenTimer()` |
+| 抬腕 | QMI8658 `acc_z > 7.0g` | `OnImuWristUp` → `ResetScreenTimer()` |
+| 语音聊天 | 状态轮询 500ms 检测到非 idle | `ResetScreenTimer()` |
+
+### 9.4 CO5300 亮度控制
+
+`WatchBacklight::SetBrightnessImpl` 通过 QSPI 命令 `0x51` 控制 AMOLED 亮度：
+
+```cpp
+uint32_t cmd = (LCD_OPCODE_WRITE_CMD << 24) | (0x51UL << 8);
+esp_lcd_panel_io_tx_param(panel_io_, cmd, &brightness, 1);
+```
+
+QSPI 总线由 `s_panel_mutex` 信号量保护，与 LVGL flush 互斥。
+
+### 9.5 聊天不息屏
+
+状态轮询 LVGL timer（500ms）检测到非 idle 状态时，每 500ms 调用 `ResetScreenTimer()`。只要设备在 listening/speaking/connecting 状态，计时器永远不会触发息屏。
+
+---
+
+## 十、天气获取优化
+
+### 10.1 重试策略
+
+```
+第 1 次尝试：立即发起 HTTP 请求（超时 15s）
+失败 → 第 2-3 次：间隔 5 秒重试
+失败 → 第 4-10 次：间隔 30 秒重试
+10 次均失败 → 退出任务，等 30 分钟后 lv_timer 重新触发
+成功 → 退出任务，30 分钟后 lv_timer 刷新
+```
+
+### 10.2 关键参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| URL | `http://wttr.in/Shenzhen?format=j1` | 免费天气 API |
+| 超时 | 15 秒 | HTTP 连接超时 |
+| 最大重试 | 10 次 | 避免无限循环 |
+| 刷新周期 | 30 分钟 | 成功后自动刷新间隔 |
+
+### 10.3 中文翻译（大小写不敏感）
+
+```
+thunder → 雷雨
+rain / drizzle / shower / patchy → 雨
+snow / ice → 雪
+overcast → 阴
+cloud / partly → 多云
+sunny / clear → 晴
+mist / fog / haze → 雾
+```
+
+---
+
+## 十一、分区表
 
 `partitions/v2/16m_watch.csv`:
 
@@ -371,6 +470,11 @@ assets    data    0x740000  0x8C0000  资源 (8.75MB)
 | 10 | 下拉框闪退 | 面板裁剪/scroll拦截 | 切换为按钮组展开收起 | watch_face.cc |
 | 11 | 天气显示英文 | strstr 大小写敏感 | 转小写再匹配 | watch_face.cc |
 | 12 | 主题亮色白字不可见 | 颜色硬编码 | ApplyTheme() 批量更新所有元素颜色 | watch_face.cc |
+| 13 | 抬腕唤醒亮度暗 | Backlight 初始值为 0→被纠正为 10 | 显式设置初始亮度 85，修复 saved_brightness_ | custom_watch_s3.cc |
+| 14 | 触摸无法唤醒 | lv_scr_act 事件不触发 | 改用 lv_indev 指针级事件 | custom_watch_s3.cc |
+| 15 | 天气成功后打"失败"日志 | break 后仍执行失败 log | 加 retry>=10 条件判断 | custom_watch_s3.cc |
+| 16 | 天气死循环刷日志 | DNS 失败时立即无限重试 | 限 10 次 + 阶梯延迟 | custom_watch_s3.cc |
+| 17 | 配网模式太慢 | WiFi 连接超时 60s | 缩短到 20s | wifi_board.cc |
 
 ---
 
@@ -385,6 +489,8 @@ assets    data    0x740000  0x8C0000  资源 (8.75MB)
 4. **天气 UI 更新跨任务**: 使用 `lv_async_call` 将天气更新从 FreeRTOS 任务桥接到 LVGL 任务
 
 5. **传感器单任务**: BMM150 和 QMI8658 在同一个 FreeRTOS 任务中顺序初始化，避免多个任务抢占 I2C
+6. **esp_timer 息屏**: 使用 FreeRTOS 单次定时器，触摸/抬腕/聊天时重置，30 秒无操作触发息屏
+7. **indev 级触摸唤醒**: 在指针设备 (lv_indev) 级别监听触摸，不拦截 UI 正常交互
 
 ---
 
@@ -398,24 +504,28 @@ assets    data    0x740000  0x8C0000  资源 (8.75MB)
 │  → Weather(lv_timer 15s) → Sensors(I2C: BMM150 + QMI8658)      │
 └─────────────────────────────────────────────────────────────────┘
 
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   QMI8658    │    │   BMM150     │    │   天气 HTTP   │
-│  IMU Task    │    │  LVGL Timer  │    │  FreeRTOS     │
-│  (FreeRTOS)  │    │  (200ms)     │    │  Task         │
-└──────┬───────┘    └──────┬───────┘    └──────┬────────┘
-       │                   │                   │
-       │ step_count_       │ heading           │ desc, temp_c
-       │ on_shake          │                   │
-       ▼                   ▼                   ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    CustomWatchS3Board                        │
-│  OnImuStep()  OnImuShake()  UpdateCompass()  OnWeatherUpdate()│
-└──────────────────────────────────────────────────────────────┘
-       │                   │                   │
-       ▼                   ▼                   ▼
-┌──────────────────────────────────────────────────────────────┐
-│                       WatchFace                              │
-│  UpdateSteps()  UpdateCompass()  UpdateWeather()             │
-│  (LVGL Timer 2s) (LVGL Timer 200ms) (lv_async_call)          │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   QMI8658    │    │   BMM150     │    │   天气 HTTP   │    │ 屏幕计时器   │
+│  IMU Task    │    │  LVGL Timer  │    │  FreeRTOS     │    │ esp_timer    │
+│  (FreeRTOS)  │    │  (200ms)     │    │  Task         │    │ (30s 单次)   │
+└──────┬───────┘    └──────┬───────┘    └──────┬────────┘    └──────┬───────┘
+       │ wrist_up          │ heading           │ weather          │ timeout
+       │ step_count_       │                   │                  │
+       │ on_shake          │                   │                  │
+       ▼                   ▼                   ▼                  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        CustomWatchS3Board                               │
+│  OnImuStep()  OnImuWristUp()  OnImuShake()  UpdateCompass()             │
+│  OnWeatherUpdate()  ScreenTimerCB()  ResetScreenTimer()  OnTouchWake()  │
+└─────────────────────────────────────────────────────────────────────────┘
+       │                   │                   │              │
+       ▼                   ▼                   ▼              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           WatchFace                                     │
+│  UpdateSteps()    UpdateCompass()    UpdateWeather()                    │
+│  (LVGL Timer 2s)  (LVGL Timer 200ms) (lv_async_call)                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  触摸唤醒: lv_indev → OnTouchWake → ResetScreenTimer() → SetBrightness  │
+│  聊天不息屏: 状态轮询(500ms) → 非idle → ResetScreenTimer()               │
+└─────────────────────────────────────────────────────────────────────────┘
 ```

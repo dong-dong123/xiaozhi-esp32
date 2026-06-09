@@ -17,6 +17,7 @@ public:
     void UpdateWeather(const char* desc, int temp_c);
     void UpdateSteps(int steps);
     void UpdateCompass(float heading_deg);
+    void UpdateBattery(int level, bool low, int low_remaining);
     void ShowVolumeToast(int vol);
 
 private:

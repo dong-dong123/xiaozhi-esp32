@@ -20,11 +20,13 @@
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
+#include <esp_adc/adc_oneshot.h>
 #include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <http.h>
 #include <esp_http_client.h>
+#include <esp_sleep.h>
 #include <lvgl.h>
 #include <cmath>
 extern "C" void lv_draw_sw_rgb565_swap(void *buf, uint32_t buf_size);
@@ -204,6 +206,46 @@ private:
     esp_timer_handle_t screen_timer_ = nullptr;
     bool screen_off_ = false;
     uint8_t saved_brightness_ = 85;
+    int battery_level_ = 100;         // 电量百分比
+    bool battery_low_warned_ = false; // 低电量已告警
+    uint32_t battery_low_time_ = 0;   // 告警开始时间
+    adc_oneshot_unit_handle_t adc_handle_ = nullptr;
+
+    void UpdateBatteryLevel() {
+        int raw = 0;
+        adc_oneshot_read(adc_handle_, ADC_CHANNEL_4, &raw); // GPIO14=ADC1_CH4
+        // 电池分压: 假设 2:1 分压, 原始电压 = raw * 3.3/4096 * 3
+        float voltage = (float)raw * 3.3f / 4096.0f * 3.0f;
+        if (voltage < 1.0f) { battery_level_ = 100; return; } // USB供电,无电池
+        // 锂电池 3.0V=0% 4.2V=100%
+        battery_level_ = (int)((voltage - 3.0f) / 1.2f * 100.0f);
+        if (battery_level_ < 0) battery_level_ = 0;
+        if (battery_level_ > 100) battery_level_ = 100;
+        // 低电量告警 + 60 秒关机倒计时
+        if (battery_level_ < 10 && !battery_low_warned_) {
+            battery_low_warned_ = true;
+            battery_low_time_ = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            ESP_LOGW(TAG, "电池电量低(%d%%)，60秒后关机", battery_level_);
+        }
+        if (battery_low_warned_) {
+            uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - battery_low_time_;
+            if (elapsed > 60000) {
+                ESP_LOGW(TAG, "低电量关机");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_deep_sleep_start();
+            }
+        }
+        if (battery_level_ >= 15) battery_low_warned_ = false;
+    }
+
+    int GetBatteryPercent() { return battery_level_; }
+    bool IsBatteryLow() { return battery_low_warned_; }
+    int GetLowBatteryRemaining() {
+        if (!battery_low_warned_) return 60;
+        uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - battery_low_time_;
+        int remaining = 60 - (int)(elapsed / 1000);
+        return remaining > 0 ? remaining : 0;
+    }
     int weather_temp_;
 
     // ---- 电源初始化 ----
@@ -244,6 +286,19 @@ private:
         boot_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
         boot_conf.intr_type = GPIO_INTR_DISABLE;
         gpio_config(&boot_conf);
+
+        // ADC 初始化（电池电压检测，GPIO14 = ADC1_CH4）
+        adc_oneshot_unit_init_cfg_t adc_cfg = {
+            .unit_id = ADC_UNIT_1,
+            .clk_src = ADC_RTC_CLK_SRC_DEFAULT,
+            .ulp_mode = ADC_ULP_MODE_DISABLE,
+        };
+        adc_oneshot_new_unit(&adc_cfg, &adc_handle_);
+        adc_oneshot_chan_cfg_t chan_cfg = {
+            .atten = ADC_ATTEN_DB_12,  // 0~3.3V 量程
+            .bitwidth = ADC_BITWIDTH_12,
+        };
+        adc_oneshot_config_channel(adc_handle_, ADC_CHANNEL_4, &chan_cfg);
 
         vTaskDelay(pdMS_TO_TICKS(120));
     }
@@ -662,6 +717,14 @@ public:
                 indev = lv_indev_get_next(indev);
             }
             ESP_LOGI(TAG, "Screen timeout: %d s", SCREEN_TIMEOUT_MS / 1000);
+
+            // 电池电量定时读取（每 5 秒）
+            lv_timer_create([](lv_timer_t* bt) {
+                auto* b = static_cast<CustomWatchS3Board*>(lv_timer_get_user_data(bt));
+                b->UpdateBatteryLevel();
+                if (b->watch_face_) b->watch_face_->UpdateBattery(
+                    b->GetBatteryPercent(), b->IsBatteryLow(), b->GetLowBatteryRemaining());
+            }, 5000, self);
 
             // 设置初始亮度（覆盖 backlight 的默认值 0）
             self->backlight_->SetBrightness(85, true);

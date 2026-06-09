@@ -845,6 +845,26 @@ void WatchFace::SettingsSliderCB(lv_event_t* e) {
     if (codec) codec->SetOutputVolume(vol);
 }
 
+static int s_battery_level = 100;
+static bool s_battery_low = false;
+static int s_battery_remaining = 60;
+
+void WatchFace::UpdateBattery(int level, bool low, int remaining) {
+    s_battery_level = level;
+    s_battery_low = low;
+    s_battery_remaining = remaining;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d%%", level);
+    lv_label_set_text(battery_label_, buf);
+    if (low) {
+        lv_obj_set_style_text_color(battery_label_, lv_color_hex(0xFF3333), 0);
+    } else {
+        Settings s("display", false);
+        bool dark = (s.GetString("theme", "dark") == "dark");
+        lv_obj_set_style_text_color(battery_label_, dark ? C_WHITE : lv_color_hex(0x000000), 0);
+    }
+}
+
 void WatchFace::UpdateStatusBar() {
     bool wifi_ok = false;
     auto* app = &Application::GetInstance();
@@ -864,7 +884,8 @@ void WatchFace::UpdateStatusBar() {
     lv_label_set_text(battery_icon_, font_awesome_get_utf8("battery_full"));
     lv_obj_set_style_text_color(battery_icon_, fg, 0);
     lv_obj_set_style_text_color(battery_label_, fg, 0);
-    lv_label_set_text(battery_label_, "100%");
+    // 电量从 UpdateBattery 更新，此处不覆盖
+    (void)battery_icon_;
 }
 
 void WatchFace::StatusTimerCB(lv_timer_t* timer) {
